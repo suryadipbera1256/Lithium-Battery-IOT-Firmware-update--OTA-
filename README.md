@@ -1,4 +1,4 @@
-# Pointo AI - Enterprise Battery Fleet Diagnostics Firmware
+# Enterprise Battery Fleet Diagnostics Firmware 
 
 ![Version](https://img.shields.io/badge/Version-v1.0.0-blue)
 ![Platform](https://img.shields.io/badge/Platform-ESP32-orange)
