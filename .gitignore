@@ -1,0 +1,40 @@
+# ==========================================
+# Pointo AI Firmware - Git Ignore File
+# ==========================================
+
+# PlatformIO
+.pio/
+lib/*/examples/
+lib/*/test/
+
+# VS Code / IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.code-workspace
+
+# Environment & Credentials (CRITICAL)
+.env
+certs/*.pem
+certs/*.key
+certs/*.crt
+certs/*.der
+
+# Python & Scripts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+pip-log.txt
+
+# OS Generated Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

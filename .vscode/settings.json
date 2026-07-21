@@ -1,0 +1,11 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "python.analysis.extraPaths": [
+        "./scripts"
+    ],
+    "files.exclude": {
+        "**/.pio": true,
+        "**/.vscode": false
+    },
+    "C_Cpp.errorSquiggles": "enabled"
+}
