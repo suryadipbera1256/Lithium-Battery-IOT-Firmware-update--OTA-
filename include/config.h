@@ -3,10 +3,19 @@
 
 /* =========================================================
  * AWS IOT CORE CONFIGURATION
+ * (Values are dynamically injected from .env at compile-time)
  * ========================================================= */
-#define AWS_IOT_ENDPOINT    "your-endpoint-ats.iot.ap-south-1.amazonaws.com"
-#define THING_NAME          "ESP32_BMS_PROD"
+#ifndef AWS_IOT_ENDPOINT
+#define AWS_IOT_ENDPOINT    "default-endpoint-ats.iot.ap-south-1.amazonaws.com"
+#endif
+
+#ifndef THING_NAME
+#define THING_NAME          "DEFAULT_THING"
+#endif
+
+#ifndef FW_VERSION
 #define FW_VERSION          "1.0.0"
+#endif
 
 /* =========================================================
  * HARDWARE PIN DEFINITIONS
