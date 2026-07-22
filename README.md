@@ -6,7 +6,7 @@
 ![Framework](https://img.shields.io/badge/Framework-PlatformIO-lightgrey)
 
 ## 📌 Overview
-This repository contains the enterprise-grade firmware for the **Pointo AI** Battery Management System (BMS) telemetry unit. Built on the ESP32 micro-controller and Quectel EC200U-CN LTE modem, it utilizes **AWS IoT Core** with Mutual TLS (mTLS) for highly secure, real-time data streaming and over-the-air (OTA) updates via AWS IoT Jobs.
+This repository contains the enterprise-grade firmware for the **Pointo AI** Battery Management System (BMS) telemetry unit. Built on the ESP32 micro-controller and Quectel EC200U-CN LTE modem, it utilizes **AWS IoT Core** with Mutual TLS (mTLS) for highly secure, real-time data streaming and over-the-air (OTA) updates via AWS IoT Jobs..
 
 ## ✨ Key Features
 * **CAN Bus Integration:** Real-time data parsing from BMS (Voltage, Current, SOC, Cell parameters) via standard CAN protocol (250kbps/500kbps).
