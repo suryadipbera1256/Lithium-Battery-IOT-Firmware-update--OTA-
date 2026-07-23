@@ -227,17 +227,25 @@ void connectAndVerify() {
 
 void checkIncoming() {
     if (!SerialAT.available()) return;
-    char buf[256];
+    
+    // AWS OTA Job payloads with Pre-signed URLs are huge. Increased buffer to 1536 bytes.
+    char buf[1536]; 
     size_t idx = 0;
     unsigned long start = millis();
     
-    while (millis() - start < 150) {
+    // Increased timeout and dynamic reset to ensure the full payload is received
+    while (millis() - start < 500) { 
         while (SerialAT.available() && idx < sizeof(buf) - 1) {
             buf[idx++] = (char)SerialAT.read();
+            start = millis(); // Reset timer when new data arrives to catch the whole chunk
         }
     }
     buf[idx] = '\0';
     if (idx == 0) return;
+    
+    // Debug print so you can actually SEE the job arriving!
+    Serial.println("\n[DEBUG] Incoming MQTT Message Received:");
+    Serial.println(buf);
     
     if (otaCheckDownlink(buf)) return;
     
@@ -250,12 +258,15 @@ void checkIncoming() {
 
 void setup() {
     Serial.begin(115200);
+    
+    // ⚠️ CRITICAL FIX: MUST be called BEFORE SerialAT.begin() or modem.begin()
+    SerialAT.setRxBufferSize(2048); 
+    
     pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW);
     pinMode(MQ2_PIN, INPUT); pinMode(MQ8_PIN, INPUT);
 
-    Serial.println("\n=== POINT-AI FIRMWARE (AWS ENTERPRISE V1.0.1) ===");
+    Serial.println("\n=== POINT-AI FIRMWARE (AWS ENTERPRISE V1.0.0) ===");
     
-    // OTA App Rollback Verification
     esp_ota_mark_app_valid_cancel_rollback();
     Serial.println("[OTA] Firmware validated! Rollback cancelled.");
 
@@ -266,6 +277,7 @@ void setup() {
         bmeAvailable = true;
     }
 
+    // Now it's safe to start the modem, as the UART FIFO is already 2048 bytes!
     if (!modem.begin()) {
         Serial.println("[ERROR] Modem init failed!");
     }
