@@ -14,7 +14,7 @@
 #endif
 
 #ifndef FW_VERSION
-#define FW_VERSION          "1.0.0"
+#define FW_VERSION          "1.0.1"
 #endif
 
 /* =========================================================
@@ -67,11 +67,20 @@ struct GPSData {
 
 // Structure to hold Cellular Network and Device Identity info
 struct DeviceInfo {
-  String imei; String ccid; String operator_name; String operator_code; 
-  int signal_strength; int data_mode; long area_code; long cell_id;         
+  char imei[16];
+  char ccid[24];
+  char operator_name[32];
+  char operator_code[10]; 
+  int signal_strength; 
+  int data_mode; 
+  long area_code; 
+  long cell_id;         
 };
 
 // Structure to hold finalized Location Data (GPS fallback to LBS)
 struct LocationData {
-  float latitude; float longitude; String source; unsigned long timestamp;
+  float latitude; 
+  float longitude; 
+  char source[16]; 
+  unsigned long timestamp;
 };

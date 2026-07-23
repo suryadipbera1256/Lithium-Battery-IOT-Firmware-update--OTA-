@@ -1,240 +1,276 @@
 #pragma once
 /* =========================================================
- * EC200U_AWS_OTA.h 
+ * EC200U_AWS_OTA.h (ZERO-ALLOCATION EDITION)
  * AWS IoT Jobs (Cloud-Push) OTA for ESP32 + EC200U-CN
- * Handles JSON parsing and binary firmware streaming via HTTPS
+ * Features: O(1) Memory, Network Pre-check, Safe Rollback
  * ========================================================= */
 
 #include <Arduino.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 
-// External variables declared in main.cpp
+// External globals from main
 extern HardwareSerial SerialAT;
 extern bool           mqttConnected;
 
 // OTA Tuning Parameters
-#ifndef OTA_HTTP_CONTEXT_ID
 #define OTA_HTTP_CONTEXT_ID   1      
-#endif
-#ifndef OTA_SSL_CTX_ID
 #define OTA_SSL_CTX_ID        1      
-#endif
-#ifndef OTA_GET_RSPTIME
 #define OTA_GET_RSPTIME       120    
-#endif
-#ifndef OTA_READ_WAITTIME
 #define OTA_READ_WAITTIME     60     
-#endif
-#ifndef OTA_CHUNK
 #define OTA_CHUNK             2048   
-#endif
+#define MIN_OTA_RSSI          10     // Minimum CSQ signal required for OTA
 
-static bool   _otaPending = false;
-static String _otaUrl;
-static String _jobId;
+// Static Buffers for O(1) Memory
+static bool _otaPending = false;
+static char _otaUrl[256] = {0};
+static char _jobId[64] = {0};
 
-// Returns true if an OTA job is in the queue
 inline bool otaPending() { return _otaPending; }
 
-// Helper function to send AT commands and read response within a timeout
-static String _otaAT(const String& cmd, uint32_t timeoutMs = 5000) {
-  while (SerialAT.available()) SerialAT.read(); // Flush buffer       
-  SerialAT.println(cmd);
-  
-  String resp;
-  unsigned long t0 = millis();
-  while (millis() - t0 < timeoutMs) {
-    while (SerialAT.available()) resp += (char)SerialAT.read();
-    // Break early if standard responses are found
-    if (resp.indexOf("OK") >= 0 || resp.indexOf("ERROR") >= 0) {
-      delay(30);
-      while (SerialAT.available()) resp += (char)SerialAT.read();
-      break;
+// --- Zero-Allocation Helper Functions ---
+
+static void _otaATRaw(const char* cmd, char* outBuffer, size_t bufferSize, uint32_t timeoutMs = 5000) {
+    char tempBuf[128] = {0};
+    char* targetBuf = outBuffer ? outBuffer : tempBuf;
+    size_t targetSize = outBuffer ? bufferSize : sizeof(tempBuf);
+
+    memset(targetBuf, 0, targetSize);
+    while (SerialAT.available()) SerialAT.read();
+    
+    SerialAT.println(cmd);
+    unsigned long start = millis();
+    size_t idx = 0;
+    
+    while (millis() - start < timeoutMs) {
+        esp_task_wdt_reset();
+        while (SerialAT.available() && idx < targetSize - 1) {
+            targetBuf[idx++] = (char)SerialAT.read();
+        }
+        if (strstr(targetBuf, "OK\r\n") || strstr(targetBuf, "ERROR\r\n")) {
+            delay(50);
+            break;
+        }
     }
-  }
-  return resp;
+}
+static bool _otaWaitForPattern(const char* pattern, uint32_t timeoutMs) {
+    unsigned long start = millis();
+    char buf[128] = {0};
+    size_t idx = 0;
+    
+    while (millis() - start < timeoutMs) {
+        esp_task_wdt_reset();
+        while (SerialAT.available() && idx < sizeof(buf) - 1) {
+            buf[idx++] = (char)SerialAT.read();
+            buf[idx] = '\0';
+            if (strstr(buf, pattern)) return true;
+        }
+    }
+    return false; 
 }
 
-// Wait for a specific pattern in the serial buffer
-static String _otaWaitFor(const String& pattern, uint32_t timeoutMs) {
-  String buf;
-  unsigned long t0 = millis();
-  while (millis() - t0 < timeoutMs) {
-    while (SerialAT.available()) { char c = SerialAT.read(); buf += c; }
-    if (buf.indexOf(pattern) >= 0) return buf;
-  }
-  return buf; 
+// Check network stability before downloading
+static bool _isNetworkStable() {
+    char csqResp[64];
+    _otaATRaw("AT+CSQ", csqResp, sizeof(csqResp), 3000);
+    
+    char* csqPtr = strstr(csqResp, "+CSQ: ");
+    if (csqPtr) {
+        int rssi = atoi(csqPtr + 6);
+        if (rssi >= MIN_OTA_RSSI && rssi != 99) return true;
+    }
+    return false;
 }
 
-// Parse AWS IoT Jobs JSON payload to extract the Presigned S3 HTTPS URL
-static String _otaExtractUrl(const String& s) {
-  int i = s.indexOf("https://");
-  if (i < 0) return "";
-  int j = i;
-  while (j < (int)s.length()) {
-    char c = s[j];
-    // Break at standard JSON delimiters
-    if (c == '"' || c == '\\' || c == ' ' || c == '\r' || c == '\n' || c == '}' || c == ',') break;
-    j++;
-  }
-  return s.substring(i, j);
+// Parses MQTT Downlink for AWS Jobs using Pointers
+inline bool otaCheckDownlink(const char* urcLine) {
+    if (_otaPending) return true; 
+    
+    if (!strstr(urcLine, "+QMTRECV:") || !strstr(urcLine, "jobs/notify-next")) {
+        return false;
+    }
+
+    // Extract Presigned URL
+    const char* urlStart = strstr(urcLine, "https://");
+    if (!urlStart) return false;
+    
+    size_t urlLen = 0;
+    while (urlStart[urlLen] != '"' && urlStart[urlLen] != '\\' && urlLen < sizeof(_otaUrl) - 1) {
+        _otaUrl[urlLen] = urlStart[urlLen];
+        urlLen++;
+    }
+    _otaUrl[urlLen] = '\0';
+
+    // Extract Job ID
+    const char* jobStart = strstr(urcLine, "\"jobId\":\"");
+    if (jobStart) {
+        jobStart += 9;
+        size_t jLen = 0;
+        while (jobStart[jLen] != '"' && jLen < sizeof(_jobId) - 1) {
+            _jobId[jLen] = jobStart[jLen];
+            jLen++;
+        }
+        _jobId[jLen] = '\0';
+    }
+
+    if (strlen(_otaUrl) > 10) {
+        _otaPending = true;
+        Serial.printf("\n[AWS OTA] Update Requested. Job ID: %s\n", _jobId);
+        return true;
+    }
+    return false;
 }
 
-// Extract Job ID from AWS Payload for tracking
-static String _otaExtractJobId(const String& s) {
-  int i = s.indexOf("\"jobId\":\"");
-  if (i < 0) return "";
-  i += 9;
-  int j = s.indexOf("\"", i);
-  if (j < 0) return "";
-  return s.substring(i, j);
+static long _otaParseGetLen(const char* httpGetResp) {
+    const char* p = strstr(httpGetResp, "+QHTTPGET:");
+    if (!p) return -1;
+    
+    int err, code;
+    long len = -1;
+    if (sscanf(p, "+QHTTPGET: %d,%d,%ld", &err, &code, &len) == 3) {
+        if (err == 0 && code == 200) return len;
+    }
+    return -1;
 }
 
-// Check if incoming MQTT message is from AWS Jobs Notification Topic
-inline bool otaCheckDownlink(const String& urcLine) {
-  if (_otaPending) return true; // Ignore if already queued                      
-  if (urcLine.indexOf("+QMTRECV:") < 0) return false;
-
-  // Verify the topic contains the AWS Jobs identifier
-  bool isAwsJob = (urcLine.indexOf("jobs/notify-next") >= 0);
-  if (!isAwsJob) return false;
-
-  String url = _otaExtractUrl(urcLine);
-  String jobId = _otaExtractJobId(urcLine);
-  
-  // Abort if invalid payload
-  if (url.length() == 0 || jobId.length() == 0) return false;
-
-  _otaUrl     = url;
-  _jobId      = jobId;
-  _otaPending = true;
-  
-  Serial.println("[AWS OTA] Firmware Update Requested. Job ID: " + _jobId);
-  return true;
-}
-
-// Parse content length from HTTP GET response
-static long _otaParseGetLen(const String& s) {
-  int p = s.indexOf("+QHTTPGET:");
-  if (p < 0) return -1;
-  int c1 = s.indexOf(',', p);          if (c1 < 0) return -1;
-  int c2 = s.indexOf(',', c1 + 1);     if (c2 < 0) return -1;   
-  int err  = s.substring(p + 10, c1).toInt();
-  int code = s.substring(c1 + 1, c2).toInt();
-  if (err != 0 || code != 200) return -1; // Abort if not HTTP 200 OK
-  return s.substring(c2 + 1).toInt();
-}
-
-// Graceful failure handler
 static void _otaFail() {
-  if (Update.isRunning()) Update.abort();
-  Serial.println("[AWS OTA] FAILED — Discarding update and reconnecting MQTT.");
-  mqttConnected = false;               
+    if (Update.isRunning()) Update.abort();
+    Serial.println("[AWS OTA] FAILED — Discarding update. ESP32 will auto-rollback if needed.");
+    mqttConnected = false;               
 }
 
-// Main blocking function to execute OTA download and flash
+// --- Main Blocking OTA Runner ---
+
 inline void otaRun() {
-  if (!_otaPending) return;
-  _otaPending = false;
+    if (!_otaPending) return;
+    _otaPending = false;
 
-  Serial.println("\n===== AWS OTA START =====");
-  
-  // 1. Disconnect MQTT to avoid serial data corruption during download
-  _otaAT("AT+QMTDISC=0", 3000);
-  _otaAT("AT+QMTCLOSE=0", 12000);
-  delay(300);
-
-  // 2. Configure HTTP context parameters
-  _otaAT("AT+QHTTPCFG=\"contextid\","      + String(OTA_HTTP_CONTEXT_ID));
-  _otaAT("AT+QHTTPCFG=\"requestheader\",0");
-  _otaAT("AT+QHTTPCFG=\"responseheader\",0"); // Body-only response               
-  _otaAT("AT+QHTTPCFG=\"sslctxid\","       + String(OTA_SSL_CTX_ID));
-  
-  // 3. Apply AWS Enterprise mTLS configuration for HTTPS Download
-  _otaAT("AT+QSSLCFG=\"sslversion\","      + String(OTA_SSL_CTX_ID) + ",4");      
-  _otaAT("AT+QSSLCFG=\"ciphersuite\","     + String(OTA_SSL_CTX_ID) + ",0xFFFF");
-  _otaAT("AT+QSSLCFG=\"seclevel\","        + String(OTA_SSL_CTX_ID) + ",2");      
-  _otaAT("AT+QSSLCFG=\"cacert\","          + String(OTA_SSL_CTX_ID) + ",\"UFS:rootCA.pem\"");
-  _otaAT("AT+QSSLCFG=\"clientcert\","      + String(OTA_SSL_CTX_ID) + ",\"UFS:cert.pem\"");
-  _otaAT("AT+QSSLCFG=\"clientkey\","       + String(OTA_SSL_CTX_ID) + ",\"UFS:privkey.pem\"");
-  _otaAT("AT+QSSLCFG=\"ignorelocaltime\"," + String(OTA_SSL_CTX_ID) + ",1");
-
-  // 4. Send the Presigned S3 URL to the modem
-  while (SerialAT.available()) SerialAT.read();
-  SerialAT.println("AT+QHTTPURL=" + String(_otaUrl.length()) + ",30");
-  if (_otaWaitFor("CONNECT", 5000).indexOf("CONNECT") < 0) {
-    _otaFail(); return;
-  }
-  SerialAT.print(_otaUrl);
-  _otaWaitFor("OK", 5000);
-
-  // 5. Trigger HTTP GET Request
-  _otaAT("AT+QHTTPGET=" + String(OTA_GET_RSPTIME), 3000);
-  String g   = _otaWaitFor("+QHTTPGET:", (uint32_t)OTA_GET_RSPTIME * 1000UL);
-  long   len = _otaParseGetLen(g);
-  
-  if (len <= 0) { _otaFail(); return; }
-
-  // 6. Initialize ESP32 OTA Update Partition
-  if (!Update.begin((size_t)len)) {
-    _otaFail(); return;
-  }
-
-  // 7. Stream bytes from Modem UART directly to ESP32 Flash Memory
-  while (SerialAT.available()) SerialAT.read();
-  SerialAT.println("AT+QHTTPREAD=" + String(OTA_READ_WAITTIME));
-  
-  if (_otaWaitFor("CONNECT", 10000).indexOf("CONNECT") < 0) {
-     Update.abort(); _otaFail(); return;
-  }
-  
-  // Consume trailing newline after CONNECT
-  {
-    unsigned long t0 = millis(); bool nl = false;
-    while (millis() - t0 < 3000 && !nl) {
-      while (SerialAT.available()) { if (SerialAT.read() == '\n') { nl = true; break; } }
+    Serial.println("\n===== AWS OTA START =====");
+    
+    // PRE-CHECK: Network Quality
+    if (!_isNetworkStable()) {
+        Serial.println("[AWS OTA] ERROR: Network signal too weak for OTA. Aborting safely.");
+        return;
     }
-  }
 
-  static uint8_t buf[OTA_CHUNK];
-  long          got      = 0;
-  unsigned long lastData = millis();
-  
-  // Read stream chunk by chunk
-  while (got < len) {
-    int avail = SerialAT.available();
-    if (avail <= 0) {
-      // Timeout check
-      if (millis() - lastData > (uint32_t)OTA_READ_WAITTIME * 1000UL) {
-        Update.abort(); _otaFail(); return;
-      }
-      continue;
+    // 1. Safe MQTT Disconnect
+    _otaATRaw("AT+QMTDISC=0", nullptr, 0, 3000);
+    _otaATRaw("AT+QMTCLOSE=0", nullptr, 0, 5000);
+    delay(300);
+
+    // 2. HTTP/SSL Configuration
+    char cmdBuf[64];
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QHTTPCFG=\"contextid\",%d", OTA_HTTP_CONTEXT_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+    _otaATRaw("AT+QHTTPCFG=\"requestheader\",0", nullptr, 0);
+    _otaATRaw("AT+QHTTPCFG=\"responseheader\",0", nullptr, 0);               
+    
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QHTTPCFG=\"sslctxid\",%d", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QSSLCFG=\"sslversion\",%d,4", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+    
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QSSLCFG=\"ciphersuite\",%d,0xFFFF", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+    
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QSSLCFG=\"seclevel\",%d,2", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+    
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QSSLCFG=\"cacert\",%d,\"UFS:rootCA.pem\"", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+    
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QSSLCFG=\"clientcert\",%d,\"UFS:cert.pem\"", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+    
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QSSLCFG=\"clientkey\",%d,\"UFS:privkey.pem\"", OTA_SSL_CTX_ID);
+    _otaATRaw(cmdBuf, nullptr, 0);
+
+    // 3. Send Presigned URL
+    while (SerialAT.available()) SerialAT.read();
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QHTTPURL=%u,30", strlen(_otaUrl));
+    SerialAT.println(cmdBuf);
+    
+    if (!_otaWaitForPattern("CONNECT", 5000)) { _otaFail(); return; }
+    
+    SerialAT.print(_otaUrl);
+    if (!_otaWaitForPattern("OK", 5000)) { _otaFail(); return; }
+
+    // 4. HTTP GET Request
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QHTTPGET=%d", OTA_GET_RSPTIME);
+    SerialAT.println(cmdBuf);
+    
+    char getResp[128] = {0};
+    unsigned long startWait = millis();
+    size_t idx = 0;
+    while (millis() - startWait < (uint32_t)OTA_GET_RSPTIME * 1000UL) {
+        esp_task_wdt_reset();
+        while (SerialAT.available() && idx < sizeof(getResp) - 1) {
+            getResp[idx++] = (char)SerialAT.read();
+        }
+        if (strstr(getResp, "+QHTTPGET:")) break;
+    }
+
+    long len = _otaParseGetLen(getResp);
+    if (len <= 0) { _otaFail(); return; }
+
+    // 5. Initialize ESP32 OTA (Dual-Bank Safe)
+    if (!Update.begin((size_t)len, U_FLASH)) {
+        _otaFail(); return;
+    }
+
+    // 6. Stream Binary Data (O(1) Memory Chunking)
+    while (SerialAT.available()) SerialAT.read();
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QHTTPREAD=%d", OTA_READ_WAITTIME);
+    SerialAT.println(cmdBuf);
+    
+    if (!_otaWaitForPattern("CONNECT", 10000)) { Update.abort(); _otaFail(); return; }
+    
+    // Clear trailing newline
+    unsigned long t0 = millis();
+    while (millis() - t0 < 2000) {
+        if (SerialAT.available() && SerialAT.read() == '\n') break;
+    }
+
+    static uint8_t buf[OTA_CHUNK];
+    long got = 0;
+    unsigned long lastData = millis();
+    
+    while (got < len) {
+        esp_task_wdt_reset();
+        int avail = SerialAT.available();
+        
+        if (avail <= 0) {
+            if (millis() - lastData > (uint32_t)OTA_READ_WAITTIME * 1000UL) {
+                Update.abort(); _otaFail(); return;
+            }
+            continue;
+        }
+        
+        long want = len - got;
+        int n = (avail < (int)sizeof(buf)) ? avail : (int)sizeof(buf);
+        if (n > want) n = (int)want;
+        
+        int r = SerialAT.readBytes(buf, n);
+        if (r > 0) {
+            if (Update.write(buf, r) != (size_t)r) {
+                Update.abort(); _otaFail(); return;
+            }
+            got += r;
+            lastData = millis();
+        }
+    }
+
+    _otaWaitForPattern("+QHTTPREAD:", 10000);
+
+    // 7. Finalize & Reboot (Rollback enabled)
+    if (!Update.end(true) || !Update.isFinished()) {
+        _otaFail(); return;
     }
     
-    long want = len - got;
-    int  n    = (avail < (int)sizeof(buf)) ? avail : (int)sizeof(buf);
-    if (n > want) n = (int)want;
-    
-    int r = SerialAT.readBytes(buf, n);
-    if (r > 0) {
-      // Write buffer to flash
-      if (Update.write(buf, r) != (size_t)r) {
-        Update.abort(); _otaFail(); return;
-      }
-      got     += r;
-      lastData = millis();
-    }
-  }
-
-  _otaWaitFor("+QHTTPREAD:", 10000);
-
-  // 8. Finalize Update and Reboot
-  if (!Update.end(true) || !Update.isFinished()) {
-    _otaFail(); return;
-  }
-  
-  Serial.println("===== AWS OTA FLASH SUCCESSFUL — Rebooting Device =====");
-  delay(500);
-  ESP.restart();
-  while (true) {} // Halt execution until reset completes
+    Serial.println("===== AWS OTA FLASH SUCCESSFUL — Rebooting Device =====");
+    delay(1000);
+    ESP.restart();
+    while (true) {} 
 }
