@@ -1,6 +1,6 @@
 /* =========================================================
- * ESP32 + EC200U-CN + BMS (AWS IOT CORE - ENTERPRISE V1.0.0)
- * Non-blocking, Self-healing, Non-hang Architecture
+ * POINT-AI FIRMWARE (AWS ENTERPRISE V1.0.0)
+ * Modular, Zero-Allocation, Non-blocking Architecture
  * ========================================================= */
 
 #include <Arduino.h>
@@ -9,8 +9,8 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME680.h>
 #include "driver/twai.h"
-#include "config.h"           // Hardware and AWS configuration
-#include "EC200U_AWS_OTA.h"   // AWS OTA Handlers
+#include "config.h"           
+#include "EC200U_AWS_OTA.h"   
 
 // ============ GLOBALS ============
 BMSData bmsData = {0};
@@ -39,6 +39,8 @@ unsigned long lastUpload = 0;
 unsigned long lastBMSRead = 0;
 unsigned long lastGPSRead = 0;
 unsigned long lastDeviceInfoRead = 0;
+unsigned long lastReconnectAttempt = 0;
+const unsigned long reconnectCooldown = 20000;
 
 // ============ HELPER FUNCTIONS ============
 
@@ -197,17 +199,30 @@ void readGPS() {
 
 // ============ AWS MQTT HANDLING ============
 
-void mqttPublish(const String &topic, const String &payload) {
-  String cmd = "AT+QMTPUBEX=0,1,1,0,\"" + topic + "\"," + String(payload.length());
-  while (SerialAT.available()) SerialAT.read();
-  SerialAT.println(cmd);
-  
-  unsigned long start = millis(); bool gotPrompt = false;
-  while (millis() - start < 3000) {
-    if (SerialAT.available()) { if (SerialAT.read() == '>') { gotPrompt = true; break; } }
-  }
-  if (!gotPrompt) return;
+// Zero-Allocation O(1) MQTT Publish function
+void publishToAWS(const char* topic, const char* payload) {
+  if (topic == nullptr || payload == nullptr) return;
 
+  char cmdBuf[128];
+  int len = snprintf(cmdBuf, sizeof(cmdBuf), "AT+QMTPUBEX=0,1,1,0,\"%s\",%u", topic, strlen(payload));
+  
+  if (len < 0 || (size_t)len >= sizeof(cmdBuf)) {
+      Serial.println("[ERROR] MQTT Command truncated!");
+      return;
+  }
+
+  while (SerialAT.available()) SerialAT.read();
+  SerialAT.println(cmdBuf);
+  
+  unsigned long start = millis(); 
+  bool gotPrompt = false;
+  while (millis() - start < 3000) {
+      if (SerialAT.available()) { 
+          if (SerialAT.read() == '>') { gotPrompt = true; break; } 
+      }
+  }
+  
+  if (!gotPrompt) return;
   SerialAT.print(payload);
   
   unsigned long waitTime = millis();
@@ -288,9 +303,8 @@ void setup() {
 
   Serial.println("\n=== POINT-AI FIRMWARE (AWS ENTERPRISE V1.0.0) ===");
   
-  SerialAT.setRxBufferSize(16384); // Expanded for OTA
+  SerialAT.setRxBufferSize(16384);
 
-  // 1. Initialize I2C and BME680 (Non-blocking)
   Serial.println("[INIT] Checking BME680 Sensor...");
   Wire.begin(21, 22);
   if (!bme.begin(0x77)) {
@@ -301,7 +315,6 @@ void setup() {
     bmeAvailable = true;
   }
 
-  // 2. Initialize Modem (Non-blocking retry)
   Serial.println("[INIT] Contacting EC200U Modem...");
   if (!modem.begin()) {
     Serial.println("[ERROR] Modem not responding to AT. Check RX/TX and Power!");
@@ -309,7 +322,6 @@ void setup() {
     Serial.println("[SUCCESS] Modem AT Bridge Ready.");
   }
   
-  // 3. Network Registration (With timeout log)
   Serial.println("[INIT] Registering to Cellular Network...");
   bool netOk = false;
   for (int i = 0; i < 15; i++) { 
@@ -326,7 +338,6 @@ void setup() {
     Serial.println("\n[SUCCESS] Network Registered.");
   }
   
-  // Attach Data APN & SSL Setup
   modem.attachData(apn.c_str());
   
   sendATCommand("AT+QIACT=1", 10000);
@@ -353,17 +364,12 @@ void setup() {
 
 // ============ MAIN EVENT LOOP ============
 
-unsigned long lastReconnectAttempt = 0;
-const unsigned long reconnectCooldown = 20000;
-
 void loop() {
-  // 1. Check and execute pending Over-The-Air (OTA) firmware updates
   if (otaPending()) { 
     otaRun(); 
     return; 
   }
 
-  // 2. Handle MQTT reconnection logic if connection drops
   if (!mqttConnected) {
     if (millis() - lastReconnectAttempt > reconnectCooldown) {
       lastReconnectAttempt = millis();
@@ -372,10 +378,8 @@ void loop() {
     return;
   }
 
-  // 3. Process incoming MQTT messages and OTA downlink triggers
   checkIncoming();
 
-  // 4. Periodically fetch GPS location and device metadata based on configured intervals
   if (millis() - lastGPSRead >= gpsReadInterval) { 
     lastGPSRead = millis(); 
     readGPS(); 
@@ -386,66 +390,50 @@ void loop() {
     collectDeviceInfo(); 
   }
 
-  // 5. Construct and publish complete telemetry telemetry payload at regular intervals
   if (millis() - lastUpload >= uploadInterval) {
     lastUpload = millis();
 
-    // A. Read raw values from analog gas sensors
     int rawMQ2 = analogRead(MQ2_PIN);
     int rawMQ8 = analogRead(MQ8_PIN);
 
-    // B. Read environmental parameters from BME680 sensor (if present)
     float temp = 0.0, hum = 0.0, press = 0.0, gasRes = 0.0;
     if (bmeAvailable) {
       if (bme.performReading()) {
         temp = bme.temperature;
         hum = bme.humidity;
-        press = bme.pressure / 100.0F; // Convert to hPa
-        gasRes = bme.gas_resistance / 1000.0F; // Convert to KOhms
+        press = bme.pressure / 100.0F;
+        gasRes = bme.gas_resistance / 1000.0F;
       }
     }
 
-    // C. Construct structured JSON payload for AWS IoT Core
-    String payload = "{";
-    payload += "\"thing_name\":\"" + String(THING_NAME) + "\",";
-    payload += "\"fw_version\":\"" + String(FW_VERSION) + "\",";
-    
-    // Location Data (GPS or Cell Tower LBS Fallback)
-    payload += "\"location\":{";
-    payload += "\"latitude\":" + String(currentLocation.latitude, 6) + ",";
-    payload += "\"longitude\":" + String(currentLocation.longitude, 6) + ",";
-    payload += "\"source\":\"" + currentLocation.source + "\",";
-    payload += "\"speed_kmh\":" + String(gpsData.speed, 2) + ",";
-    payload += "\"satellites\":" + String(gpsData.satellites);
-    payload += "},";
+    // Zero-Allocation JSON Construction using Static Buffer (No Memory Leaks)
+    char jsonPayload[512]; 
+    int written = snprintf(jsonPayload, sizeof(jsonPayload),
+        "{"
+        "\"thing_name\":\"%s\","
+        "\"fw_version\":\"%s\","
+        "\"location\":{\"latitude\":%.6f,\"longitude\":%.6f,\"source\":\"%s\",\"speed_kmh\":%.2f,\"satellites\":%d},"
+        "\"sensors\":{\"mq2_gas_raw\":%d,\"mq8_gas_raw\":%d,\"bme680\":{\"temp_c\":%.2f,\"humidity_pct\":%.2f,\"pressure_hpa\":%.2f,\"gas_res_kohm\":%.2f}},"
+        "\"telemetry\":{\"rssi\":%d,\"imei\":\"%s\",\"total_odometer\":%.2f}"
+        "}",
+        THING_NAME, 
+        FW_VERSION,
+        currentLocation.latitude, currentLocation.longitude, currentLocation.source.c_str(), gpsData.speed, gpsData.satellites,
+        rawMQ2, rawMQ8, 
+        temp, hum, press, gasRes,
+        deviceInfo.signal_strength, deviceInfo.imei.c_str(), totalOdometer
+    );
 
-    // Gas and Environmental Sensor Data
-    payload += "\"sensors\":{";
-    payload += "\"mq2_gas_raw\":" + String(rawMQ2) + ",";
-    payload += "\"mq8_gas_raw\":" + String(rawMQ8) + ",";
-    payload += "\"bme680\":{";
-    payload += "\"temp_c\":" + String(temp, 2) + ",";
-    payload += "\"humidity_pct\":" + String(hum, 2) + ",";
-    payload += "\"pressure_hpa\":" + String(press, 2) + ",";
-    payload += "\"gas_res_kohm\":" + String(gasRes, 2);
-    payload += "}";
-    payload += "},";
-
-    // Device Diagnostics and Network Telemetry
-    payload += "\"telemetry\":{";
-    payload += "\"rssi\":" + String(deviceInfo.signal_strength) + ",";
-    payload += "\"imei\":\"" + deviceInfo.imei + "\",";
-    payload += "\"total_odometer\":" + String(totalOdometer, 2);
-    payload += "}";
-    
-    payload += "}";
-
-    // D. Publish the structured JSON telemetry payload to AWS IoT MQTT topic
-    String baseTopic = "bms/data/" + String(THING_NAME);
-    mqttPublish(baseTopic + "/telemetry", payload);
-    
-    // Print payload to Serial Monitor for debugging
-    Serial.println("\n[MQTT] Published Complete JSON Payload to AWS:");
-    Serial.println(payload);
+    if (written > 0 && (size_t)written < sizeof(jsonPayload)) {
+        char topicBuf[64];
+        snprintf(topicBuf, sizeof(topicBuf), "bms/data/%s/telemetry", THING_NAME);
+        
+        publishToAWS(topicBuf, jsonPayload);
+        
+        Serial.println("\n[MQTT] Published JSON Payload to AWS (Zero-Allocation):");
+        Serial.println(jsonPayload);
+    } else {
+        Serial.println("[ERROR] Payload buffer overflow prevented!");
+    }
   }
 }
