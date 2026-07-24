@@ -260,15 +260,16 @@ void setup() {
     Serial.begin(115200);
     
     // ⚠️ CRITICAL FIX: MUST be called BEFORE SerialAT.begin() or modem.begin()
-    SerialAT.setRxBufferSize(2048); 
+    SerialAT.setRxBufferSize(8192); 
     
     pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW);
     pinMode(MQ2_PIN, INPUT); pinMode(MQ8_PIN, INPUT);
 
     Serial.println("\n=== POINT-AI FIRMWARE (AWS ENTERPRISE V1.0.0) ===");
     
-    esp_ota_mark_app_valid_cancel_rollback();
-    Serial.println("[OTA] Firmware validated! Rollback cancelled.");
+    // Rollback confirmation is deferred to otaBootReport() below — the image
+    // is marked valid only AFTER connectivity self-test passes, and a pending
+    // OTA job is reported SUCCEEDED at that point.
 
     Wire.begin(21, 22);
     if (!bme.begin(0x77)) {
@@ -277,7 +278,7 @@ void setup() {
         bmeAvailable = true;
     }
 
-    // Now it's safe to start the modem, as the UART FIFO is already 2048 bytes!
+    // Now it's safe to start the modem — the UART RX ring is already 8192 bytes.
     if (!modem.begin()) {
         Serial.println("[ERROR] Modem init failed!");
     }
@@ -305,6 +306,9 @@ void setup() {
     
     collectDeviceInfo();
     connectAndVerify();
+
+    // Post-boot: confirm image health + report SUCCEEDED for a completed job.
+    if (mqttConnected) otaBootReport();
 }
 
 // ============ MAIN LOOP ============
@@ -316,6 +320,10 @@ void loop() {
         if (millis() - lastReconnectAttempt > reconnectCooldown) {
             lastReconnectAttempt = millis();
             connectAndVerify();
+            if (mqttConnected) {
+                otaFlushDeferredReport();  // publish FAILED if an OTA just failed
+                otaBootReport();           // confirm health + SUCCEEDED if boot was post-OTA
+            }
         }
         return;
     }
