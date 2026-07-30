@@ -22,10 +22,10 @@ bool buildTelemetryPayload(char* buffer, size_t bufferSize,
         "}",
         THING_NAME, 
         FW_VERSION,
-        loc->latitude, loc->longitude, loc->source.c_str(), gps->speed, gps->satellites,
+        loc->latitude, loc->longitude, loc->source, gps->speed, gps->satellites,
         mq2, mq8, 
         temp, hum, press, gasRes,
-        devInfo->signal_strength, devInfo->imei.c_str(), totalOdo
+        devInfo->signal_strength, devInfo->imei, totalOdo
     );
 
     // Check for buffer truncation (security/stability check)

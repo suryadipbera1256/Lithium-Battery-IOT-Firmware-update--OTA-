@@ -8,11 +8,12 @@ private:
     int _rxPin;
     int _txPin;
     
-    String sendCommand(const String& cmd, uint32_t timeoutMs = 2000);
-
 public:
     QuectelEC200U(HardwareSerial& serial, uint32_t baud, int rx, int tx);
     bool begin();
     bool waitForNetwork(uint32_t timeoutMs = 10000);
     bool attachData(const char* apn);
+    
+    // O(1) Memory Safe Command Function
+    void sendCommandRaw(const char* cmd, char* outBuffer, size_t bufferSize, uint32_t timeoutMs = 2000);
 };

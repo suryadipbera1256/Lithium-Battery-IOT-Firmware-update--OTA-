@@ -3,47 +3,58 @@
 QuectelEC200U::QuectelEC200U(HardwareSerial& serial, uint32_t baud, int rx, int tx) 
     : _serial(serial), _baud(baud), _rxPin(rx), _txPin(tx) {}
 
-String QuectelEC200U::sendCommand(const String& cmd, uint32_t timeoutMs) {
+// Zero-Allocation implementation
+void QuectelEC200U::sendCommandRaw(const char* cmd, char* outBuffer, size_t bufferSize, uint32_t timeoutMs) {
+    if (outBuffer == nullptr || bufferSize == 0) return;
+
     while (_serial.available()) _serial.read();
     _serial.println(cmd);
     
-    String response = "";
+    memset(outBuffer, 0, bufferSize);
+    size_t idx = 0;
     unsigned long start = millis();
+    
     while (millis() - start < timeoutMs) {
-        while (_serial.available()) {
-            response += (char)_serial.read();
+        while (_serial.available() && idx < bufferSize - 1) {
+            outBuffer[idx++] = (char)_serial.read();
         }
-        if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) {
-            delay(50);
+        if (strstr(outBuffer, "OK\r\n") != nullptr || strstr(outBuffer, "ERROR\r\n") != nullptr) {
+            delay(50); // Allow final bytes to land
+            while (_serial.available() && idx < bufferSize - 1) {
+                outBuffer[idx++] = (char)_serial.read();
+            }
             break;
         }
     }
-    return response;
 }
 
 bool QuectelEC200U::begin() {
     _serial.begin(_baud, SERIAL_8N1, _rxPin, _txPin);
     delay(1000);
     
-    // Check if modem is responsive
+    char respBuf[64];
     for(int i = 0; i < 5; i++) {
-        String resp = sendCommand("AT");
-        if(resp.indexOf("OK") != -1) return true;
+        sendCommandRaw("AT", respBuf, sizeof(respBuf), 2000);
+        if(strstr(respBuf, "OK") != nullptr) return true;
         delay(1000);
     }
     return false;
 }
 
 bool QuectelEC200U::waitForNetwork(uint32_t timeoutMs) {
-    String resp = sendCommand("AT+CREG?", timeoutMs);
-    if (resp.indexOf("+CREG: 0,1") != -1 || resp.indexOf("+CREG: 0,5") != -1) {
+    char respBuf[128];
+    sendCommandRaw("AT+CREG?", respBuf, sizeof(respBuf), timeoutMs);
+    if (strstr(respBuf, "+CREG: 0,1") != nullptr || strstr(respBuf, "+CREG: 0,5") != nullptr) {
         return true;
     }
     return false;
 }
 
 bool QuectelEC200U::attachData(const char* apn) {
-    String cmd = String("AT+QICSGP=1,1,\"") + apn + "\"";
-    String resp = sendCommand(cmd, 3000);
-    return (resp.indexOf("OK") != -1);
+    char cmdBuf[64];
+    snprintf(cmdBuf, sizeof(cmdBuf), "AT+QICSGP=1,1,\"%s\"", apn);
+    
+    char respBuf[128];
+    sendCommandRaw(cmdBuf, respBuf, sizeof(respBuf), 3000);
+    return (strstr(respBuf, "OK") != nullptr);
 }
