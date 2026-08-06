@@ -10,7 +10,7 @@ import time
 import os
 
 # Configuration variables (Adjust COM port according to your OS)
-SERIAL_PORT = 'COM3' 
+SERIAL_PORT = '/dev/cu.usbserial-0001' 
 BAUD_RATE = 115200
 
 # Helper function to send AT commands and decode response
@@ -59,9 +59,9 @@ def main():
         send_at_command(ser, "AT")
         
         # Sequentially upload the three required AWS mTLS certificates
-        upload_file(ser, "rootCA.pem", "../certs/rootCA.pem")
-        upload_file(ser, "cert.pem", "../certs/cert.pem")
-        upload_file(ser, "privkey.pem", "../certs/privkey.pem")
+        upload_file(ser, "rootCA.pem", "certs/rootCA.pem")
+        upload_file(ser, "cert.pem", "certs/cert.pem")
+        upload_file(ser, "privkey.pem", "certs/privkey.pem")
         
         # Verify the files are present in the modem's filesystem
         print("\n--- Verifying Uploaded Files in UFS ---")

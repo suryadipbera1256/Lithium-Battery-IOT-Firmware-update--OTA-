@@ -37,16 +37,16 @@ bool buildTelemetryPayload(char* buffer, size_t bufferSize,
     return true;
 }
 
-void publishToAWS(HardwareSerial& serialAT, const char* topic, const char* payload) {
-    if (topic == nullptr || payload == nullptr) return;
+bool publishToAWS(HardwareSerial& serialAT, const char* topic, const char* payload) {
+    if (topic == nullptr || payload == nullptr) return false;
 
     // 1. Build the AT Command dynamically without using String class
     char cmdBuf[128];
     int len = snprintf(cmdBuf, sizeof(cmdBuf), "AT+QMTPUBEX=0,1,1,0,\"%s\",%u", topic, strlen(payload));
-    
+
     if (len < 0 || (size_t)len >= sizeof(cmdBuf)) {
         Serial.println("[ERROR] MQTT Command truncated!");
-        return;
+        return false;
     }
 
     // Flush RX buffer
@@ -69,15 +69,46 @@ void publishToAWS(HardwareSerial& serialAT, const char* topic, const char* paylo
     
     if (!gotPrompt) {
         Serial.println("[ERROR] Modem timeout waiting for '>' prompt.");
-        return;
+        return false;
     }
 
     // 4. Dispatch the raw binary stream directly (Zero-Allocation)
     serialAT.print(payload);
-    
-    // Give modem time to process
+
+    /* 5. Confirm the broker took it. "+QMTPUBEX: <client>,<msgid>,<result>"
+     *    with result 0 means delivered; anything else (or nothing at all) means
+     *    the payload is gone. Scanned in a small rolling buffer so no String
+     *    allocation happens on the hot publish path. */
+    char ack[96] = {0};
+    size_t idx = 0;
+    bool   ok  = false;
     unsigned long waitTime = millis();
-    while(millis() - waitTime < 500) { 
-        if(serialAT.available()) serialAT.read(); 
+    while (millis() - waitTime < 3000) {
+        while (serialAT.available()) {
+            if (idx >= sizeof(ack) - 1) {
+                size_t shift = sizeof(ack) / 2;
+                memmove(ack, ack + shift, sizeof(ack) - shift);
+                idx -= shift;
+                memset(ack + idx, 0, sizeof(ack) - idx);
+            }
+            ack[idx++] = (char)serialAT.read();
+            ack[idx]   = '\0';
+        }
+        char* p = strstr(ack, "+QMTPUBEX:");
+        if (p) {
+            int client = -1, msgid = -1, result = -1;
+            if (sscanf(p, "+QMTPUBEX: %d,%d,%d", &client, &msgid, &result) == 3) {
+                ok = (result == 0);
+                if (!ok) Serial.printf("[ERROR] Publish rejected, result=%d\n", result);
+                break;
+            }
+        }
+        if (strstr(ack, "ERROR")) break;
+        delay(1);
     }
+
+    if (!ok && !strstr(ack, "+QMTPUBEX:")) {
+        Serial.println("[ERROR] No publish confirmation from modem.");
+    }
+    return ok;
 }

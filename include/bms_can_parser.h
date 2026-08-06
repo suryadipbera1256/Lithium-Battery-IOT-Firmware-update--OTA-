@@ -1,13 +1,29 @@
 #pragma once
 #include <Arduino.h>
 #include "config.h"
+#include "driver/twai.h"
+
+// External globals defined in main.cpp
+extern BMSData bmsData;
+extern bool baudRateLocked;
+extern uint32_t currentBaud;
 
 /**
- * @brief Parses raw CAN frames into a strongly-typed BMSData struct in O(1) time and space.
- * 
- * @param frameId The standard or extended CAN message identifier.
- * @param frameData Pointer to the 8-byte payload buffer.
- * @param outData Pointer to the BMSData struct to populate.
- * @return true if the frame was successfully parsed, false if data was invalid.
+ * @brief Initializes the TWAI (CAN) driver at a specific baud rate.
  */
-bool parseBMSFrame(uint32_t frameId, const uint8_t* frameData, BMSData* outData);
+bool startCAN(uint32_t baud);
+
+/**
+ * @brief Requests a data frame from the BMS using ID and 0x5A payload, and validates CRC.
+ */
+bool requestFrame(uint16_t id, uint8_t* buf);
+
+/**
+ * @brief Sequentially requests and parses all BMS data frames (0x100 to 0x110).
+ */
+void readBMS();
+
+/**
+ * @brief Calculates standard Modbus CRC-16.
+ */
+uint16_t calc_crc16(uint8_t* data, uint8_t len);

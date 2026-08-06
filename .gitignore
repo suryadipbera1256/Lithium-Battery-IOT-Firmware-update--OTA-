@@ -4,6 +4,7 @@
 
 # PlatformIO
 .pio/
+.pio_core/
 lib/*/examples/
 lib/*/test/
 
