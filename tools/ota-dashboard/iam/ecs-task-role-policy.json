@@ -1,0 +1,164 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "SINGLE SOURCE OF TRUTH for the dashboard's AWS permissions. Attach it to whichever principal the app runs as: (a) the ECS TASK ROLE on Fargate, where boto3 resolves it from the container metadata endpoint, or (b) a plain IAM USER for local Docker development. The permission set is identical in both cases -- only the trust relationship differs -- so it is deliberately NOT duplicated per deployment target. Distinct from the task EXECUTION role, which only pulls the image and fetches secrets.",
+  "Statement": [
+    {
+      "Sid": "FirmwareUploadAndListing",
+      "Comment": "core/firmware.py: put_object + head_object under firmwares/, archive_job_doc under jobs/. Object-level actions are scoped to the two prefixes, so a bug cannot write elsewhere in the bucket.",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:HeadObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::as-ota-firmware/firmwares/*",
+        "arn:aws:s3:::as-ota-firmware/jobs/*"
+      ]
+    },
+    {
+      "Sid": "FirmwareListBucketScopedToPrefixes",
+      "Comment": "list_artifacts() paginates ListObjectsV2. ListBucket is a BUCKET-level action, so the prefix restriction must come from a condition, not the resource ARN.",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::as-ota-firmware",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "firmwares/*",
+            "jobs/*",
+            "firmwares/",
+            "jobs/"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyFirmwareDeletion",
+      "Comment": "The dashboard never deletes. An explicit Deny survives any future policy addition or wildcard grant on this role.",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketAcl"
+      ],
+      "Resource": [
+        "arn:aws:s3:::as-ota-firmware",
+        "arn:aws:s3:::as-ota-firmware/*"
+      ]
+    },
+    {
+      "Sid": "FleetDiscoveryReadOnly",
+      "Comment": "core/fleet.py: list_things / list_things_in_thing_group / describe_thing. These are non-resource-scopable in IoT, hence the wildcard -- they are read-only and carry no mutation risk.",
+      "Effect": "Allow",
+      "Action": [
+        "iot:ListThings",
+        "iot:ListThingGroups",
+        "iot:ListThingsInThingGroup",
+        "iot:ListThingTypes",
+        "iot:DescribeThing",
+        "iot:DescribeEndpoint"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FleetIndexSearch",
+      "Comment": "Optional: only needed if fleet indexing is enabled, which is what surfaces connectivity.connected in pre-flight validation.",
+      "Effect": "Allow",
+      "Action": "iot:SearchIndex",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:index/AWS_Things"
+    },
+    {
+      "Sid": "CreateAndTrackOtaJobs",
+      "Comment": "Job actions are scoped to the as-ota-* jobId prefix produced by make_job_id(), so this role cannot touch or cancel jobs created by another system.",
+      "Effect": "Allow",
+      "Action": [
+        "iot:CreateJob",
+        "iot:DescribeJob",
+        "iot:CancelJob",
+        "iot:DescribeJobExecution",
+        "iot:ListJobExecutionsForJob"
+      ],
+      "Resource": [
+        "arn:aws:iot:ap-south-1:441464447047:job/as-ota-*"
+      ]
+    },
+    {
+      "Sid": "TargetOnlyOwnThings",
+      "Comment": "CreateJob also authorises against the TARGET ARNs. Narrow this to a thing group (…:thinggroup/BatteryFleetProd) once the fleet is grouped, which removes the ability to target arbitrary things.",
+      "Effect": "Allow",
+      "Action": "iot:CreateJob",
+      "Resource": [
+        "arn:aws:iot:ap-south-1:441464447047:thing/*",
+        "arn:aws:iot:ap-south-1:441464447047:thinggroup/*"
+      ]
+    },
+    {
+      "Sid": "ListJobsForTrackingPage",
+      "Comment": "iot:ListJobs cannot be resource-scoped; the tracking page filters client-side by prefix.",
+      "Effect": "Allow",
+      "Action": "iot:ListJobs",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassPresignRoleToIotOnly",
+      "Comment": "CreateJob with presignedUrlConfig requires iam:PassRole on the signing role. The condition pins the consumer to the IoT service, so this role cannot hand the presign role to EC2, Lambda or anything else. WITHOUT this statement CreateJob returns AccessDenied and OTA cannot work.",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::441464447047:role/AsOtaIotPresignRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "iot.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "LiveTelemetryWssConnect",
+      "Comment": "core/wss.py signs a WSS URL for the browser. The client id is pinned to the as-dash-* pattern the widget generates, so this credential cannot impersonate a device.",
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:client/as-dash-*"
+    },
+    {
+      "Sid": "LiveTelemetrySubscribeScoped",
+      "Comment": "Scoped to the telemetry topic pattern only -- never '#'. Subscribe authorises the FILTER (topicfilter/), Receive authorises the delivered TOPIC (topic/); both are required and they are different ARN forms.",
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:topicfilter/bms/data/*/telemetry"
+    },
+    {
+      "Sid": "LiveTelemetryReceiveScoped",
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:topic/bms/data/*/telemetry"
+    },
+    {
+      "Sid": "DenyDevicePublishImpersonation",
+      "Comment": "The dashboard is an observer. Denying Publish outright means a compromised dashboard credential cannot forge telemetry, and cannot publish to $aws/things/*/jobs/*/update to fake a SUCCEEDED execution.",
+      "Effect": "Deny",
+      "Action": [
+        "iot:Publish",
+        "iot:RetainPublish"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyFleetMutation",
+      "Comment": "Defence in depth: this role must never be able to reshape the fleet or its security posture, regardless of what is added above later.",
+      "Effect": "Deny",
+      "Action": [
+        "iot:DeleteThing",
+        "iot:CreateThing",
+        "iot:UpdateThing",
+        "iot:AttachPolicy",
+        "iot:DetachPolicy",
+        "iot:CreatePolicy",
+        "iot:CreateKeysAndCertificate",
+        "iot:UpdateCertificate",
+        "iot:DeleteJob"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

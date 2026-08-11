@@ -1,0 +1,51 @@
+{
+  "Version": "2012-10-17",
+  "_README": "ECS TASK EXECUTION ROLE — used by the ECS AGENT, not by the application. It pulls the image, fetches the secret, and writes logs. Keeping it separate from the task role is the point: the application never holds permission to read raw Secrets Manager values, and the agent never holds permission to create IoT jobs. Attach AmazonECSTaskExecutionRolePolicy as well, or use the statements below alone for a tighter grant. Replace ACCOUNT_ID and REGION.",
+  "Statement": [
+    {
+      "Sid": "PullDashboardImageOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchCheckLayerAvailability"
+      ],
+      "Resource": "arn:aws:ecr:ap-south-1:441464447047:repository/as-ota-dashboard"
+    },
+    {
+      "Sid": "EcrAuthToken",
+      "Comment": "GetAuthorizationToken is account-scoped by design and cannot take a resource ARN.",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "InjectSecretsTomlAtBoot",
+      "Comment": "One secret, one ARN. This is the ONLY principal that can read it. The value is the entire secrets.toml document, injected as the SECRETS_TOML env var and written to tmpfs by docker-entrypoint.sh.",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:ap-south-1:441464447047:secret:as-ota-dashboard/secrets-toml-*"
+    },
+    {
+      "Sid": "DecryptSecretIfCmkEncrypted",
+      "Comment": "Only required when the secret uses a customer-managed KMS key. Drop this statement if it uses the aws/secretsmanager default key.",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:ap-south-1:441464447047:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "secretsmanager.ap-south-1.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ShipLogsToOneGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-south-1:441464447047:log-group:/ecs/as-ota-dashboard:*"
+    }
+  ]
+}

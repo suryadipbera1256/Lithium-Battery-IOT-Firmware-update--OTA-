@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowIotToAssumeForUrlSigning",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "iot.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": "441464447047"
+        },
+        "ArnLike": {
+          "aws:SourceArn": "arn:aws:iot:ap-south-1:441464447047:job/as-ota-*"
+        }
+      }
+    }
+  ]
+}

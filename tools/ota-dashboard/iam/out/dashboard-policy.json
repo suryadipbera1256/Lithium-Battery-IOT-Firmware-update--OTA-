@@ -1,0 +1,150 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FirmwareUploadAndListing",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:HeadObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::as-ota-firmware/firmwares/*",
+        "arn:aws:s3:::as-ota-firmware/jobs/*"
+      ]
+    },
+    {
+      "Sid": "FirmwareListBucketScopedToPrefixes",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::as-ota-firmware",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "firmwares/*",
+            "jobs/*",
+            "firmwares/",
+            "jobs/"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyFirmwareDeletion",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketAcl"
+      ],
+      "Resource": [
+        "arn:aws:s3:::as-ota-firmware",
+        "arn:aws:s3:::as-ota-firmware/*"
+      ]
+    },
+    {
+      "Sid": "FleetDiscoveryReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iot:ListThings",
+        "iot:ListThingGroups",
+        "iot:ListThingsInThingGroup",
+        "iot:ListThingTypes",
+        "iot:DescribeThing",
+        "iot:DescribeEndpoint"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FleetIndexSearch",
+      "Effect": "Allow",
+      "Action": "iot:SearchIndex",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:index/AWS_Things"
+    },
+    {
+      "Sid": "CreateAndTrackOtaJobs",
+      "Effect": "Allow",
+      "Action": [
+        "iot:CreateJob",
+        "iot:DescribeJob",
+        "iot:CancelJob",
+        "iot:DescribeJobExecution",
+        "iot:ListJobExecutionsForJob"
+      ],
+      "Resource": [
+        "arn:aws:iot:ap-south-1:441464447047:job/as-ota-*"
+      ]
+    },
+    {
+      "Sid": "TargetOnlyOwnThings",
+      "Effect": "Allow",
+      "Action": "iot:CreateJob",
+      "Resource": [
+        "arn:aws:iot:ap-south-1:441464447047:thing/*",
+        "arn:aws:iot:ap-south-1:441464447047:thinggroup/*"
+      ]
+    },
+    {
+      "Sid": "ListJobsForTrackingPage",
+      "Effect": "Allow",
+      "Action": "iot:ListJobs",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassPresignRoleToIotOnly",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::441464447047:role/AsOtaIotPresignRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "iot.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "LiveTelemetryWssConnect",
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:client/as-dash-*"
+    },
+    {
+      "Sid": "LiveTelemetrySubscribeScoped",
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:topicfilter/bms/data/*/telemetry"
+    },
+    {
+      "Sid": "LiveTelemetryReceiveScoped",
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:ap-south-1:441464447047:topic/bms/data/*/telemetry"
+    },
+    {
+      "Sid": "DenyDevicePublishImpersonation",
+      "Effect": "Deny",
+      "Action": [
+        "iot:Publish",
+        "iot:RetainPublish"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyFleetMutation",
+      "Effect": "Deny",
+      "Action": [
+        "iot:DeleteThing",
+        "iot:CreateThing",
+        "iot:UpdateThing",
+        "iot:AttachPolicy",
+        "iot:DetachPolicy",
+        "iot:CreatePolicy",
+        "iot:CreateKeysAndCertificate",
+        "iot:UpdateCertificate",
+        "iot:DeleteJob"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -20,9 +20,10 @@
  * @param totalOdo Total odometer reading.
  * @return true if the payload was successfully formatted without truncation, false otherwise.
  */
-bool buildTelemetryPayload(char* buffer, size_t bufferSize, 
+bool buildTelemetryPayload(char* buffer, size_t bufferSize,
                            const GPSData* gps, const LocationData* loc, const DeviceInfo* devInfo,
-                           int mq2, int mq8, float temp, float hum, float press, float gasRes, 
+                           const BMSData* bms, const HealthSnapshot* health,
+                           int mq2, int mq8, float temp, float hum, float press, float gasRes,
                            float totalOdo);
 
 /**
@@ -31,5 +32,8 @@ bool buildTelemetryPayload(char* buffer, size_t bufferSize,
  * @param serialAT Reference to the HardwareSerial connected to the EC200U modem.
  * @param topic The MQTT topic to publish to (C-string).
  * @param payload The null-terminated JSON payload string.
+ * @return true only if the modem confirmed the publish with +QMTPUBEX: 0,<id>,0.
+ *         Without checking this, a failed publish is indistinguishable from a
+ *         successful one and data is lost silently.
  */
-void publishToAWS(HardwareSerial& serialAT, const char* topic, const char* payload);
+bool publishToAWS(HardwareSerial& serialAT, const char* topic, const char* payload);

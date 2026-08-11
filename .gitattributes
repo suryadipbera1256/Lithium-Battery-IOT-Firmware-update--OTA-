@@ -1,0 +1,40 @@
+# =========================================================
+# Line-ending policy
+#
+# The firmware is developed across macOS (LF) and Windows (CRLF). Without this
+# file every cross-machine diff reports 100% of every file as changed, which
+# makes code review of a merge impossible and hides real deltas.
+#
+# Canonical form in the repository is LF. Windows-only scripts are the sole
+# exception: PowerShell requires CRLF.
+# =========================================================
+
+* text=auto eol=lf
+
+# --- Firmware / tooling sources ---
+*.c     text eol=lf
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.hpp   text eol=lf
+*.py    text eol=lf
+*.ini   text eol=lf
+*.csv   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# --- Windows-only: PowerShell refuses to parse some LF constructs ---
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# --- Never touch ---
+*.bin   binary
+*.elf   binary
+*.pem   binary
+*.der   binary
+*.png   binary
+*.jpg   binary

@@ -77,6 +77,21 @@ struct DeviceInfo {
   long cell_id;         
 };
 
+/* Immutable snapshot of device_health.h state, passed by value into the payload
+ * builder. Deliberately a struct rather than having aws_iot_core.cpp include
+ * device_health.h: that header keeps its state in file-scope statics, so a
+ * second translation unit including it would get an independent copy and the
+ * watchdog task would end up watching the wrong heartbeat. Resolved properly in
+ * Phase G; until then this keeps the dependency one-way. */
+struct HealthSnapshot {
+  uint32_t    uptime_s;
+  const char* reset;
+  uint32_t    heap_free;
+  uint32_t    heap_largest;
+  uint32_t    reconnects;
+  bool        probation;
+};
+
 // Structure to hold finalized Location Data (GPS fallback to LBS)
 struct LocationData {
   float latitude; 

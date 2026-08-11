@@ -1,0 +1,100 @@
+# =========================================================
+# AS AI — OTA Dashboard, LOCAL DEVELOPMENT
+#
+# Runs the production image against LIVE AWS (S3, IoT Core, CreateJob) with no
+# Secrets Manager dependency: secrets.toml is bind-mounted and the entrypoint
+# prefers it over SECRETS_TOML.
+#
+#   docker compose up --build
+#   -> http://localhost:8501
+#
+# THIS FILE IS FOR LOCAL USE ONLY. It mounts credentials and skips the
+# read-only root filesystem. ECS uses the task definition in docs/deployment.md.
+# =========================================================
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: as-ota-dashboard:local
+    container_name: as-ota-dashboard
+
+    # Bound to loopback ONLY. "8501:8501" would publish on every host interface,
+    # exposing a console that can flash live battery packs to the whole LAN.
+    #
+    # Host port is configurable because run.ps1 very likely already owns 8501; a
+    # bind clash leaves the container in `Created` with NO logs, and the health
+    # check then succeeds against the OTHER Streamlit, which looks like success.
+    #   DASH_PORT=8599 docker compose up
+    ports:
+      - "127.0.0.1:${DASH_PORT:-8501}:8501"
+
+    volumes:
+      # --- secrets (required) -------------------------------------------
+      # Read-only: the container must never be able to rewrite your credentials.
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+      # --- AWS credentials, OPTION B (see docs) -------------------------
+      # Uncomment to use your existing CLI profiles / SSO cache instead of
+      # pasting keys. Requires [aws].profile in secrets.toml.
+      #   Linux/macOS:
+      # - ${HOME}/.aws:/home/app/.aws:ro
+      #   Windows (PowerShell expands USERPROFILE):
+      # - ${USERPROFILE}/.aws:/home/app/.aws:ro
+
+      # --- live source reload, OPTION (dev loop) ------------------------
+      # Uncomment these plus the `command:` override below to edit Python on the
+      # host and have Streamlit reload without rebuilding the image.
+      # - ./app.py:/app/app.py:ro
+      # - ./core:/app/core:ro
+      # - ./components:/app/components:ro
+      # - ./static:/app/static:ro
+
+    environment:
+      # AWS_* are read by boto3's DEFAULT CREDENTIAL CHAIN, which core/aws.py
+      # only reaches when [aws].access_key_id and [aws].secret_access_key in
+      # secrets.toml are BOTH EMPTY. Non-empty keys there shadow these entirely.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      # Informational only: core/aws.py always passes region_name=[aws].region
+      # from secrets.toml, so THIS DOES NOT CHANGE THE REGION. Kept so the CLI
+      # inside the container behaves consistently if you exec into it.
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-ap-south-1}
+      # Needed only when mounting ~/.aws, so boto3 finds it under the app user.
+      AWS_CONFIG_FILE: /home/app/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /home/app/.aws/credentials
+
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "true"
+
+    # Optional .env alongside this file; see .env.example. Absent is fine.
+    env_file:
+      - path: .env
+        required: false
+
+    # Uncomment together with the source mounts above for hot reload.
+    # command: ["streamlit","run","app.py","--server.port=8501",
+    #           "--server.address=0.0.0.0","--server.headless=true",
+    #           "--server.fileWatcherType=poll","--server.runOnSave=true"]
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8501/_stcore/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # Streamlit + botocore in one process; plenty, and it surfaces a runaway
+    # allocation locally instead of on Fargate.
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

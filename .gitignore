@@ -1,36 +1,139 @@
-# ==========================================
-# AS AI Firmware - Git Ignore File
-# ==========================================
+# ==========================================================
+# AS AI — Battery Fleet Firmware + OTA Dashboard
+#
+# Layout this protects:
+#   /                        PlatformIO C++ firmware (ESP32 + EC200U-CN)
+#   /tools/ota-dashboard/    isolated Python/Streamlit workspace
+#
+# Secret rules are duplicated deliberately: once by exact path and once as a
+# recursive glob. A single misplaced copy of secrets.toml or a .pem key is a
+# fleet-wide credential leak, so these patterns are intentionally redundant.
+# ==========================================================
 
-# PlatformIO
+# ----------------------------------------------------------
+# CREDENTIALS & SECRETS  (CRITICAL — never relax these)
+# ----------------------------------------------------------
+# Environment files, including every variant (.env.local, .env.production, ...)
+.env
+.env.*
+!.env.example
+
+# X.509 material for AWS IoT mTLS — anywhere in the tree, not just certs/.
+*.pem
+*.key
+*.crt
+*.der
+*.p12
+*.pfx
+certs/*
+!certs/.gitkeep
+!certs/README*
+
+# Streamlit secrets: real values live here, templates end in .example.
+# Both forms are ignored at any depth; only the .example is ever committed.
+secrets.toml
+**/secrets.toml
+.streamlit/secrets.toml
+tools/ota-dashboard/.streamlit/secrets.toml
+!**/secrets.toml.example
+
+# AWS / cloud credential caches that tooling sometimes drops in-tree
+.aws/
+*.credentials
+
+# ----------------------------------------------------------
+# PLATFORMIO / FIRMWARE BUILD OUTPUT
+# ----------------------------------------------------------
 .pio/
+.pioenvs/
+.piolibdeps/
 lib/*/examples/
 lib/*/test/
 
-# VS Code / IDE
+# Compiled images and link artefacts. Firmware binaries are published to
+# s3://as-ota-firmware/firmwares/ — the bucket is the distribution channel,
+# not git. Use `git add -f` if you ever genuinely need to pin one.
+*.bin
+*.elf
+*.hex
+*.map
+*.a
+*.o
+*.d
+*.su
+
+# ----------------------------------------------------------
+# PYTHON  (dashboard + scripts/)
+# ----------------------------------------------------------
+# Virtualenvs. The root .venv holds PlatformIO; the dashboard has its own,
+# deliberately separate one. Neither is ever committed.
+.venv/
+venv/
+env/
+ENV/
+tools/**/.venv/
+tools/ota-dashboard/.venv/
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test / lint / type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ----------------------------------------------------------
+# EDITORS & IDE
+# ----------------------------------------------------------
+# Share the two files that make a fresh clone build correctly; ignore the rest
+# (c_cpp_properties.json and launch.json carry absolute local paths).
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
 .idea/
 *.code-workspace
+*.sublime-project
+*.sublime-workspace
 
-# Environment & Credentials (CRITICAL)
-.env
-certs/*.pem
-certs/*.key
-certs/*.crt
-certs/*.der
+# Claude Code: machine-local overrides only. A shared .claude/settings.json
+# stays tracked so team-wide hooks and permissions travel with the repo.
+.claude/settings.local.json
 
-# Python & Scripts
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-env/
-venv/
-pip-log.txt
+# ----------------------------------------------------------
+# LOGS & SCRATCH
+# ----------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+scratch/
+tmp/
 
-# OS Generated Files
+# Serial-monitor and modem AT captures — these embed IMEI/ICCID and full
+# pre-signed OTA URLs, so they are operational data, not source.
+*.cap
+monitor_*.txt
+at_capture*.txt
+
+# ----------------------------------------------------------
+# OS GENERATED
+# ----------------------------------------------------------
 .DS_Store
 .DS_Store?
 ._*
@@ -38,3 +141,4 @@ pip-log.txt
 .Trashes
 ehthumbs.db
 Thumbs.db
+desktop.ini
