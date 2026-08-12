@@ -23,7 +23,7 @@ os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
 os.environ["AWS_CONFIG_FILE"] = "nonexistent"
 os.environ["AWS_SHARED_CREDENTIALS_FILE"] = "nonexistent"
 
-PAGES = ("Firmware Registry", "Fleet & Deploy", "Job Tracking", "Live Telemetry")
+PAGES = ("Firmware Registry", "Firmware Deploy", "Job Tracking", "Live Telemetry", "Map Console")
 ARTIFACT = {
     "key": "firmware/1.0.3/firmware.bin", "version": "1.0.3", "size": 1_103_456,
     "sha256": "9f2c1ab34de5f607aa11bb22cc33dd44ee55ff66778899aabbccddeeff001122",
@@ -57,7 +57,7 @@ for p in PAGES:
               "credential" in msgs.lower(), msgs[:100])
 
 section("deploy page with no artefact staged")
-at = launch("Fleet & Deploy", artifact=None)
+at = launch("Firmware Deploy", artifact=None)
 check("no exception", not at.exception, first_exc(at))
 check("tells the operator to publish firmware first",
       any("Firmware Registry" in str(i.value) for i in at.info))

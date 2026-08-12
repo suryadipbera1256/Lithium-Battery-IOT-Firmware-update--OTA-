@@ -20,6 +20,14 @@ import streamlit as st
 from components.ui import header, kv, pill, stat, stat_row
 from core import fleet as fl
 
+try:
+    import folium
+    from folium.plugins import Draw
+    from streamlit_folium import st_folium
+    HAS_FOLIUM = True
+except ImportError:
+    HAS_FOLIUM = False
+
 # ==============================================================================
 # 1. TYPE DEFINITIONS & CONSTANTS
 # ==============================================================================
@@ -91,7 +99,7 @@ class SpatialTelemetryNode:
     color_rgba: Tuple[int, int, int, int] = field(default=(139, 152, 171, 180))
     color_hex: str = "#8b98ab"
 
-    def __post_init__() -> None:
+    def __post_init__(self) -> None:
         self.evaluate_state()
 
     def evaluate_state(self) -> FleetState:
@@ -266,6 +274,118 @@ def generate_historical_route_breadcrumbs(
 # 3. FLEET MAP CONSOLE PAGE RENDERER
 # ==============================================================================
 
+def resolve_spatial_map_style() -> Tuple[Optional[str], bool, str]:
+    """Securely resolves map tile provider based on priority:
+    1. Google Maps (Authenticated Raster TileLayer)
+    2. Mapbox (Authenticated Dark Vector Basemap)
+    3. Carto Dark Matter (Open-Source Fallback)
+
+    Returns:
+        Tuple[Optional[str], bool, str]: (tile_url_or_style, is_tile_layer, provider_description)
+    """
+    # Priority 1: Google Maps
+    gkey = ""
+    try:
+        if "gmaps" in st.secrets and "api_key" in st.secrets["gmaps"]:
+            gkey = st.secrets["gmaps"]["api_key"].strip()
+    except Exception:
+        pass
+    if not gkey:
+        gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+
+    if gkey:
+        tile_url = f"https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&key={gkey}"
+        return tile_url, True, "Google Maps High-Res Tiles (Priority 1 - Authenticated)"
+
+    # Priority 2: Mapbox
+    mkey = ""
+    try:
+        if "mapbox" in st.secrets and "api_token" in st.secrets["mapbox"]:
+            mkey = st.secrets["mapbox"]["api_token"].strip()
+    except Exception:
+        pass
+    if not mkey:
+        mkey = os.getenv("MAPBOX_API_TOKEN", "").strip()
+
+    if mkey:
+        pdk.settings.mapbox_api_key = mkey
+        return "mapbox://styles/mapbox/dark-v10", False, "Mapbox Dark Vector (Priority 2 - Authenticated)"
+
+    # Priority 3: Carto Dark Matter Fallback
+    return "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json", False, "Carto Dark Matter (Priority 3 - Open-source Fallback)"
+
+
+def render_folium_fleet_map(
+    live_spatial_state: Dict[str, SpatialTelemetryNode],
+    selected_states: List[str],
+    center_lat: float,
+    center_lng: float,
+    zoom_level: int = 11,
+    gkey: str = "",
+) -> Dict[str, Any]:
+    """Renders light/colorful Folium basemap with interactive Draw plugin & telemetry markers."""
+    m = folium.Map(
+        location=[center_lat, center_lng],
+        zoom_start=int(zoom_level),
+        tiles="OpenStreetMap",
+    )
+
+    # Add Google Maps High-Res Light Roadmap TileLayer if authenticated
+    if gkey:
+        gmaps_tile_url = f"https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&key={gkey}"
+        folium.TileLayer(
+            tiles=gmaps_tile_url,
+            attr="Google Maps Roadmap",
+            name="Google Maps Roadmap",
+            overlay=False,
+            control=True,
+        ).add_to(m)
+
+    # Add Folium Draw Plugin for interactive Polygon/Rectangle/Circle Geofencing
+    draw_plugin = Draw(
+        export=True,
+        position="topleft",
+        draw_options={
+            "polyline": False,
+            "polygon": True,
+            "circle": True,
+            "rectangle": True,
+            "marker": False,
+            "circlemarker": False,
+        },
+        edit_options={"edit": True, "remove": True},
+    )
+    draw_plugin.add_to(m)
+
+    # Add Telemetry Circle Markers with Popups & Tooltips
+    for snode in live_spatial_state.values():
+        if snode.state in selected_states and snode.lat != 0.0 and snode.lng != 0.0:
+            popup_html = (
+                f"<div style='font-family:sans-serif;font-size:12px;min-width:160px;'>"
+                f"<b>Device:</b> {snode.thing_name}<br/>"
+                f"<b>State:</b> <span style='color:{snode.color_hex};font-weight:bold;'>{snode.state}</span><br/>"
+                f"<b>Speed:</b> {snode.speed_kmh} km/h<br/>"
+                f"<b>SOC:</b> {snode.soc_pct}%<br/>"
+                f"<b>Voltage:</b> {snode.bms_voltage_v} V<br/>"
+                f"<b>Last Seen:</b> {snode.last_seen_str}"
+                f"</div>"
+            )
+            folium.CircleMarker(
+                location=[snode.lat, snode.lng],
+                radius=8,
+                color="#ffffff",
+                weight=1.5,
+                fill=True,
+                fill_color=snode.color_hex,
+                fill_opacity=0.9,
+                popup=folium.Popup(popup_html, max_width=260),
+                tooltip=f"{snode.thing_name} ({snode.state})",
+            ).add_to(m)
+
+    folium.LayerControl().add_to(m)
+    return st_folium(m, width="100%", height=520, key="fleet_folium_draw_map")
+
+
 def render_map_console() -> None:
     """Renders the isolated Fleet Map Console tab / page."""
     header(
@@ -345,17 +465,17 @@ def render_map_console() -> None:
     # Render Directive-Compliant Horizontal KPI Summary Bar
     stat_row([
         stat("Total Fleet", str(total_fleet), "registered units", tone="info"),
-        stat("Moving 🟢", str(counts["Moving"]), "speed > 0 & active", tone="ok"),
-        stat("Stopped 🔴", str(counts["Stopped"]), "static & current ≈ 0", tone="bad"),
-        stat("Idle 🟡", str(counts["Idle"]), "static & current > 0", tone="warn"),
-        stat("Towing / Theft 🟣", str(counts["Towing/Theft"]), "speed > 0 & current = 0", tone="bad" if counts["Towing/Theft"] > 0 else ""),
-        stat("Offline ⚪", str(counts["Offline"]), "no recent telemetry", tone="mute" if counts["Offline"] == 0 else "warn"),
+        stat("Moving", str(counts["Moving"]), "speed > 0 & active", tone="ok"),
+        stat("Stopped", str(counts["Stopped"]), "static & current ≈ 0", tone="bad"),
+        stat("Idle", str(counts["Idle"]), "static & current > 0", tone="warn"),
+        stat("Towing / Theft", str(counts["Towing/Theft"]), "speed > 0 & current = 0", tone="bad" if counts["Towing/Theft"] > 0 else ""),
+        stat("Offline", str(counts["Offline"]), "no recent telemetry", tone="mute" if counts["Offline"] == 0 else "warn"),
     ])
 
     # ==========================================================================
     # 3. CONTROL PANEL: FILTER, ROUTE PLAYBACK & GEOFENCE CONTROLS
     # ==========================================================================
-    st.markdown("##### ⚙️ Spatial Filters & Analysis Controls")
+    st.markdown("##### Spatial Filters & Analysis Controls")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.1, 1.2, 1.2])
 
     with ctrl_col1:
@@ -367,7 +487,7 @@ def render_map_console() -> None:
         )
 
     with ctrl_col2:
-        enable_history = st.checkbox("🚩 Route History Playback", value=False)
+        enable_history = st.checkbox("Route History Playback", value=False)
         history_device = st.selectbox(
             "Select Device for History",
             options=nodes_tuple,
@@ -375,11 +495,20 @@ def render_map_console() -> None:
         )
 
     with ctrl_col3:
-        enable_geofence = st.checkbox("🛡️ Enable Geofencing Alert Zone", value=False)
+        enable_geofence = st.checkbox("Enable Geofencing Alert Zone", value=False)
         geofence_preset = st.selectbox(
             "Geofence Preset Zone",
-            options=list(HUB_PRESETS.keys()) + ["Custom Polygon"],
+            options=list(HUB_PRESETS.keys()) + ["Custom Dynamic Circle"],
             disabled=not enable_geofence,
+        )
+        geofence_radius_m = st.slider(
+            "Geofence Radius (Meters)",
+            min_value=100,
+            max_value=5000,
+            value=2000,
+            step=100,
+            disabled=not enable_geofence,
+            help="Dynamic radius for the geofence alert boundary.",
         )
 
     # 4. Prepare PyDeck Map Data
@@ -466,7 +595,7 @@ def render_map_console() -> None:
         zoom_level = 12.0
 
         st.caption(
-            f"🚩 **Route History Loaded:** Device **{history_device}** · "
+            f"Route History Loaded: Device **{history_device}** · "
             f"{len(df_route)} breadcrumb points rendered."
         )
 
@@ -477,39 +606,44 @@ def render_map_console() -> None:
             preset = HUB_PRESETS[geofence_preset]
             geo_polygon_lng_lat = preset["polygon"]
             gf_lat, gf_lng = preset["lat"], preset["lng"]
-            radius_m = preset["radius_m"]
+            radius_m = geofence_radius_m
         else:
-            # Custom Polygon
-            st.sidebar.markdown("##### Custom Geofence Polygon Settings")
-            gf_lat = 18.9553
-            gf_lng = 72.8465
-            radius_m = 4000.0
-            geo_polygon_lng_lat = [
-                [72.8300, 18.9700],
-                [72.8650, 18.9700],
-                [72.8650, 18.9350],
-                [72.8300, 18.9350],
-            ]
+            # Custom Dynamic Circle around current fleet center
+            gf_lat, gf_lng = center_lat, center_lng
+            radius_m = geofence_radius_m
+            geo_polygon_lng_lat = []
 
-        # Draw Polygon Layer on PyDeck
-        polygon_layer = pdk.Layer(
-            "PolygonLayer",
-            data=[{"polygon": geo_polygon_lng_lat}],
-            get_polygon="polygon",
-            get_fill_color=[53, 169, 255, 50],
-            get_line_color=[53, 169, 255, 230],
-            get_line_width=3,
+        # Render Visual Geofence Circle Layer (Transparent Light Red)
+        circle_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=[{"lat": gf_lat, "lng": gf_lng, "radius": radius_m}],
+            get_position=["lng", "lat"],
+            get_fill_color=[255, 77, 77, 45],
+            get_line_color=[255, 77, 77, 220],
+            get_radius="radius",
             line_width_min_pixels=2,
             pickable=True,
         )
-        layers.append(polygon_layer)
+        layers.append(circle_layer)
 
-        # Evaluate Geofence Breaches
+        if geo_polygon_lng_lat:
+            polygon_layer = pdk.Layer(
+                "PolygonLayer",
+                data=[{"polygon": geo_polygon_lng_lat}],
+                get_polygon="polygon",
+                get_fill_color=[53, 169, 255, 40],
+                get_line_color=[53, 169, 255, 220],
+                get_line_width=3,
+                line_width_min_pixels=2,
+                pickable=True,
+            )
+            layers.append(polygon_layer)
+
+        # Evaluate Geofence Breaches against dynamic radius
         for snode in live_spatial_state.values():
             if snode.lat != 0.0 and snode.lng != 0.0:
-                is_inside = point_in_polygon(snode.lat, snode.lng, geo_polygon_lng_lat)
-                if not is_inside:
-                    dist_to_center = haversine_distance_m(snode.lat, snode.lng, gf_lat, gf_lng)
+                dist_to_center = haversine_distance_m(snode.lat, snode.lng, gf_lat, gf_lng)
+                if dist_to_center > radius_m:
                     breach_alerts.append({
                         "thing_name": snode.thing_name,
                         "state": snode.state,
@@ -521,11 +655,10 @@ def render_map_console() -> None:
     # Render Visual Geofence Alerts if breaches occur
     if breach_alerts:
         st.warning(
-            f"⚠️ **GEOFENCE BREACH ALERT:** {len(breach_alerts)} vehicle(s) detected "
+            f"GEOFENCE BREACH ALERT: {len(breach_alerts)} vehicle(s) detected "
             f"OUTSIDE designated zone `{geofence_preset}`!",
-            icon="🚨",
         )
-        with st.expander("🔍 View Breached Vehicles Details"):
+        with st.expander("View Breached Vehicles Details"):
             st.dataframe(
                 pd.DataFrame(breach_alerts),
                 use_container_width=True,
@@ -555,27 +688,63 @@ def render_map_console() -> None:
         },
     }
 
-    # Render PyDeck Canvas
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lng,
-        zoom=zoom_level,
-        pitch=35,
-        bearing=0,
-    )
+    # Render Interactive Folium Map with Drawing Plugin if available, else Pydeck canvas
+    if HAS_FOLIUM:
+        gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+        folium_output = render_folium_fleet_map(
+            live_spatial_state=live_spatial_state,
+            selected_states=selected_states,
+            center_lat=center_lat,
+            center_lng=center_lng,
+            zoom_level=zoom_level,
+            gkey=gkey,
+        )
+        if folium_output:
+            all_drawings = folium_output.get("all_drawings")
+            if all_drawings:
+                st.session_state["captured_geofences"] = all_drawings
+                st.caption(f"Active Interactive Geofence Zones: **{len(all_drawings)} drawn shape(s)** captured in session state.")
+                with st.expander("Inspect Captured GeoJSON Geofence Data"):
+                    st.json(all_drawings)
+    else:
+        # Resolve Multi-Provider Map Style (Pydeck Fallback)
+        tile_spec, is_tile_layer, provider_info = resolve_spatial_map_style()
+        st.caption(f"Spatial Tile Provider: **{provider_info}**")
 
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=layers,
-            initial_view_state=view_state,
-            tooltip=pydeck_tooltip,
-            map_style="mapbox://styles/mapbox/dark-v10",
-        ),
-        use_container_width=True,
-    )
+        if is_tile_layer and tile_spec:
+            basemap_layer = pdk.Layer(
+                "TileLayer",
+                data=tile_spec,
+                max_requests=-1,
+                pickable=False,
+                opacity=1.0,
+            )
+            layers.insert(0, basemap_layer)
+            active_map_style = None
+        else:
+            active_map_style = tile_spec
+
+        # Render PyDeck Canvas
+        view_state = pdk.ViewState(
+            latitude=center_lat,
+            longitude=center_lng,
+            zoom=zoom_level,
+            pitch=0,
+            bearing=0,
+        )
+
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=layers,
+                initial_view_state=view_state,
+                tooltip=pydeck_tooltip,
+                map_style=active_map_style,
+            ),
+            use_container_width=True,
+        )
 
     # 5. Device Details Data Grid (Filtered to current spatial view)
-    st.markdown("##### 📍 Active Spatial Fleet Summary")
+    st.markdown("##### Active Spatial Fleet Summary")
     if not df_map_nodes.empty:
         grid_df = df_map_nodes[
             ["thing_name", "state", "speed", "soc", "voltage", "current", "last_seen_str"]

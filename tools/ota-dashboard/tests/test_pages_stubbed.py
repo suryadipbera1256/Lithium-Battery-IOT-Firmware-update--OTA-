@@ -133,9 +133,9 @@ def text_of(at):
     return "\n".join(parts)
 
 
-section("Fleet & Deploy (12 nodes, 8 selected)")
+section("Firmware Deploy (12 nodes, 8 selected)")
 sel = [f"BAT-{i:03d}" for i in range(1, 9)]
-at = app("Fleet & Deploy", artifact=ARTIFACT, sel_nodes=sel)
+at = app("Firmware Deploy", artifact=ARTIFACT, sel_nodes=sel)
 check("no exception", not at.exception,
       at.exception[0].value.splitlines()[0] if at.exception else "")
 body = text_of(at)

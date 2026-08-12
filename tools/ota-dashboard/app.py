@@ -68,36 +68,41 @@ def fleet_or_stop() -> fl.Fleet:
 def sidebar() -> str:
     with st.sidebar:
         st.markdown(
-            '<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1rem">'
-            '<div class="gate-mark" style="width:34px;height:34px;font-size:13px;'
+            '<div style="display:flex;align-items:center;gap:.65rem;margin-bottom:1.2rem">'
+            '<div class="gate-mark" style="width:38px;height:38px;font-size:14px;'
             'border-radius:9px;margin:0">AS</div>'
-            '<div><div style="font-weight:650;font-size:.95rem">Fleet OTA Console</div>'
-            '<div style="color:#8b98ab;font-size:.68rem;letter-spacing:.06em">'
-            'ESP32 · EC200U-CN</div></div></div>',
+            '<div><div style="font-weight:700;font-size:1.15rem;color:#e4e9f0;line-height:1.2">Fleet OTA Console</div>'
+            '<div style="color:#00e0a4;font-weight:650;font-size:.95rem;letter-spacing:.03em;margin-top:2px;line-height:1.2">Pointo R&D</div></div></div>',
             unsafe_allow_html=True,
         )
 
         page = st.radio(
             "Section",
-            ("Firmware Registry", "Fleet & Deploy", "Job Tracking", "Live Telemetry"),
+            ("Firmware Registry", "Firmware Deploy", "Job Tracking", "Live Telemetry", "Map Console"),
             label_visibility="collapsed",
         )
 
         st.divider()
+
         ident = identity()
         r = role() or "-"
         st.markdown(
-            f'<div style="font-size:.72rem;line-height:1.75;color:#8b98ab">'
-            f'ROLE <span style="color:#00e0a4">{r.upper()}</span><br>'
+            f'<div style="background:#111823;border:1px solid #222d3d;border-radius:9px;padding:.65rem .75rem;font-size:.72rem;line-height:1.75;color:#8b98ab">'
+            f'ROLE <span style="color:#00e0a4;font-weight:600">{r.upper()}</span><br>'
             f'REGION <span style="color:#e4e9f0">{CFG.region}</span><br>'
             f'ACCOUNT <span style="color:#e4e9f0">{ident["account"]}</span><br>'
-            f'BUCKET <span style="color:#e4e9f0">{CFG.bucket or "unset"}</span></div>',
+            f'BUCKET <span style="color:#e4e9f0">{CFG.bucket or "unset"}</span><br>'
+            f'<div style="margin-top:.4rem;padding-top:.4rem;border-top:1px solid #1b2532">'
+            f'Developed by <span class="glow-text">Anish Adhikari</span> '
+            f'<span style="color: white; text-shadow: none; font-weight: normal;">&</span> '
+            f'<span class="glow-text">Suryadip Bera</span></div></div>',
             unsafe_allow_html=True,
         )
         if not is_operator():
             st.caption("Read-only role. Firmware upload and CreateJob are disabled.")
 
         st.divider()
+
         c1, c2 = st.columns(2)
         if c1.button("Refresh", use_container_width=True):
             st.cache_data.clear()
@@ -107,6 +112,7 @@ def sidebar() -> str:
 
         if not CFG.configured:
             st.error("Incomplete secrets: set [aws].region, [iot].endpoint, [s3].bucket.")
+
     return page
 
 
@@ -649,23 +655,26 @@ def page_telemetry() -> None:
                    "Enter a topic filter manually.", icon="⚠️")
         fleet = fl.Fleet((), "unavailable", "")
 
-    c1, c2 = st.columns([3, 1])
     opts = (("Selected nodes", "Whole fleet", "Custom topic") if fleet.nodes
             else ("Whole fleet", "Custom topic"))
-    scope = c2.radio("Scope", opts)
 
-    if scope == "Selected nodes":
-        pre = tuple(st.session_state.get("sel_nodes", ()))
-        nodes = tuple(c1.multiselect("Nodes", fleet.names, default=pre,
-                                     placeholder="Select nodes to stream…"))
-        topics = [CFG.telemetry_topic(n) for n in nodes]
-    elif scope == "Whole fleet":
-        # Deliberately a scoped wildcard on the telemetry prefix, never "#".
-        topics = [CFG.telemetry_topic("+")]
-        c1.text_input("Topic filter", value=topics[0], disabled=True)
-    else:
-        raw = c1.text_input("Topic filter", value=CFG.telemetry_topic("+"))
-        topics = [t.strip() for t in raw.split(",") if t.strip()]
+    with st.expander("Telemetry Stream Scope", expanded=True):
+        c1, c2 = st.columns([1.2, 2.8])
+        scope = c1.selectbox("Streaming Scope", opts, label_visibility="collapsed")
+
+        if scope == "Selected nodes":
+            pre = tuple(st.session_state.get("sel_nodes", ()))
+            nodes = tuple(c2.multiselect("Nodes", fleet.names, default=pre,
+                                         placeholder="Select nodes to stream…",
+                                         label_visibility="collapsed"))
+            topics = [CFG.telemetry_topic(n) for n in nodes]
+        elif scope == "Whole fleet":
+            # Deliberately a scoped wildcard on the telemetry prefix, never "#".
+            topics = [CFG.telemetry_topic("+")]
+            c2.text_input("Topic filter", value=topics[0], disabled=True, label_visibility="collapsed")
+        else:
+            raw = c2.text_input("Topic filter", value=CFG.telemetry_topic("+"), label_visibility="collapsed")
+            topics = [t.strip() for t in raw.split(",") if t.strip()]
 
     if not topics:
         st.info("Pick at least one node, or switch scope to the fleet wildcard.")
@@ -712,9 +721,10 @@ iot:Receive    arn:aws:iot:{CFG.region}:<account>:topic/{CFG.telemetry_topic('*'
 
 PAGES = {
     "Firmware Registry": page_firmware,
-    "Fleet & Deploy": page_deploy,
+    "Firmware Deploy": page_deploy,
     "Job Tracking": page_tracking,
     "Live Telemetry": page_telemetry,
+    "Map Console": mc.render_map_console,
 }
 
 PAGES[sidebar()]()

@@ -125,3 +125,86 @@ div[data-baseweb="tab-list"] { gap: .35rem; border-bottom: 1px solid var(--line)
 button[data-baseweb="tab"] { font-weight: 600; letter-spacing: .01em; }
 code { font-family: var(--mono) !important; font-size: .8em; }
 .stProgress > div > div > div > div { background: linear-gradient(90deg, var(--acc-2), var(--acc)); }
+
+/* ---------- compact no-scroll sidebar layout ---------- */
+section[data-testid="stSidebar"] > div:first-child {
+  padding-top: 1rem !important;
+  padding-bottom: 0.8rem !important;
+  padding-left: 0.9rem !important;
+  padding-right: 0.9rem !important;
+}
+section[data-testid="stSidebar"] hr {
+  margin: 0.45rem 0 !important;
+}
+
+/* ---------- STREAMLIT SIDEBAR RADIO OVERHAUL (DOT-LESS BUTTONS) ---------- */
+section[data-testid="stSidebar"] div[role="radiogroup"] {
+  gap: 0.38rem !important;
+}
+
+/* Hide circular radio bullet */
+section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child,
+div[data-testid="stRadioButton"] label > div:first-child {
+  display: none !important;
+}
+
+/* Elongated full-width button styling for inactive items */
+section[data-testid="stSidebar"] div[role="radiogroup"] label {
+  display: flex !important;
+  align-items: center !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  background: var(--panel) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px !important;
+  padding: 0.65rem 0.95rem !important;
+  margin: 0 0 0.35rem 0 !important;
+  transition: all 0.18s ease-in-out !important;
+  cursor: pointer !important;
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] label div[data-testid="stMarkdownContainer"] p {
+  font-size: 0.92rem !important;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  margin: 0 !important;
+  color: var(--dim);
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+  border-color: var(--acc-2) !important;
+  background: var(--panel-2) !important;
+}
+
+/* Active/selected state with fixed distinct border and background highlight */
+section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
+section[data-testid="stSidebar"] div[role="radiogroup"] label[aria-checked="true"],
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+  border: 1px solid var(--acc) !important;
+  background: linear-gradient(135deg, rgba(0, 224, 164, 0.16), rgba(53, 169, 255, 0.08)) !important;
+  box-shadow: 0 0 10px rgba(0, 224, 164, 0.15) !important;
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] div[data-testid="stMarkdownContainer"] p,
+section[data-testid="stSidebar"] div[role="radiogroup"] label[aria-checked="true"] div[data-testid="stMarkdownContainer"] p,
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] p {
+  color: var(--acc) !important;
+  font-weight: 650 !important;
+}
+
+/* ---------- glowing text footer ---------- */
+.glow-text {
+  color: var(--acc) !important;
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(0, 224, 164, 0.5), 0 0 16px rgba(0, 224, 164, 0.25);
+}
+
+/* ---------- responsive telemetry card overflow protection ---------- */
+.card .kv span:last-child,
+.kv-v {
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  max-width: 100%;
+}
