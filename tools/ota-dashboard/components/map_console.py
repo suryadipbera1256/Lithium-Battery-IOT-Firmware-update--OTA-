@@ -519,9 +519,59 @@ def render_map_console() -> None:
             disabled=not enable_history,
         )
 
+    # Dynamic Custom Hub Storage in Session State
+    if "custom_hubs" not in st.session_state:
+        st.session_state["custom_hubs"] = {}
+
+    all_hubs = {**HUB_PRESETS, **st.session_state["custom_hubs"]}
+
     with ctrl_col3:
-        st.markdown("**Interactive Geofence Tool**")
-        st.caption("Use the map drawing toolbar (top-left on map) to draw, edit, or delete custom Polygons, Rectangles, or Circles.")
+        enable_geofence = st.checkbox("Enable Active Geofence Alert Zone", value=True)
+        selected_zone_name = st.selectbox(
+            "Active Monitoring Zone",
+            options=list(all_hubs.keys()),
+            index=0 if "Kolkata R&D Hub" in all_hubs else 0,
+            disabled=not enable_geofence,
+        )
+
+        with st.expander("➕ Add / Manage Geofence Zone"):
+            st.caption("Define a new operational hub or custom alert boundary.")
+            new_zone_name = st.text_input("Zone Name", value="Kolkata R&D Center")
+            zone_type = st.radio("Boundary Shape", ("Circle (Radius)", "Polygon (Custom Area)"), horizontal=True)
+
+            z_col1, z_col2 = st.columns(2)
+            new_lat = z_col1.number_input("Center Latitude", value=22.7525975, format="%.7f")
+            new_lng = z_col2.number_input("Center Longitude", value=88.3912191, format="%.7f")
+
+            if zone_type == "Circle (Radius)":
+                new_radius = st.slider("Radius (Meters)", min_value=100, max_value=10000, value=3000, step=100)
+                new_poly = []
+            else:
+                new_radius = 3000.0
+                d = 0.02
+                new_poly = [
+                    [new_lng - d, new_lat + d],
+                    [new_lng + d, new_lat + d],
+                    [new_lng + d, new_lat - d],
+                    [new_lng - d, new_lat - d],
+                ]
+
+            add_c1, add_c2 = st.columns(2)
+            if add_c1.button("Save Zone", use_container_width=True):
+                st.session_state["custom_hubs"][new_zone_name] = {
+                    "lat": new_lat,
+                    "lng": new_lng,
+                    "radius_m": float(new_radius),
+                    "polygon": new_poly,
+                }
+                st.success(f"Saved custom zone '{new_zone_name}'!")
+                st.rerun()
+
+            if selected_zone_name in st.session_state["custom_hubs"]:
+                if add_c2.button("Delete Selected Zone", use_container_width=True):
+                    del st.session_state["custom_hubs"][selected_zone_name]
+                    st.success(f"Deleted custom zone '{selected_zone_name}'!")
+                    st.rerun()
 
     # 4. Prepare PyDeck Map Data
     map_data_list: List[Dict[str, Any]] = []
@@ -610,6 +660,43 @@ def render_map_console() -> None:
             f"Route History Loaded: Device **{history_device}** · "
             f"{len(df_route)} breadcrumb points rendered."
         )
+
+    # Real-time Breach Detection Engine against Active Monitoring Zone
+    breach_alerts: List[Dict[str, Any]] = []
+    if enable_geofence and selected_zone_name in all_hubs:
+        active_zone = all_hubs[selected_zone_name]
+        z_lat, z_lng = active_zone["lat"], active_zone["lng"]
+        z_radius = active_zone.get("radius_m", 3000.0)
+        z_polygon = active_zone.get("polygon", [])
+
+        for snode in live_spatial_state.values():
+            if snode.lat != 0.0 and snode.lng != 0.0:
+                if z_polygon and len(z_polygon) >= 3:
+                    is_inside = point_in_polygon(snode.lat, snode.lng, z_polygon)
+                else:
+                    dist_m = haversine_distance_m(snode.lat, snode.lng, z_lat, z_lng)
+                    is_inside = dist_m <= z_radius
+
+                if not is_inside:
+                    dist_m = haversine_distance_m(snode.lat, snode.lng, z_lat, z_lng)
+                    breach_alerts.append({
+                        "thing_name": snode.thing_name,
+                        "state": snode.state,
+                        "lat": snode.lat,
+                        "lng": snode.lng,
+                        "dist_km": round(dist_m / 1000.0, 2),
+                    })
+
+    if breach_alerts:
+        st.warning(
+            f"⚠️ GEOFENCE BREACH ALERT: {len(breach_alerts)} vehicle(s) detected OUTSIDE designated zone `{selected_zone_name}`!",
+        )
+        with st.expander("View Breached Vehicles Details"):
+            st.dataframe(
+                pd.DataFrame(breach_alerts),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     # PyDeck Interactive Tooltip (Styled to match dark glassmorphism theme)
     pydeck_tooltip = {
