@@ -46,6 +46,17 @@ STATE_COLORS: Dict[FleetState, Tuple[Tuple[int, int, int, int], str]] = {
 
 # Pre-defined operational hubs for default locations & geofencing
 HUB_PRESETS: Dict[str, Dict[str, Any]] = {
+    "Kolkata R&D Hub": {
+        "lat": 22.7525975,
+        "lng": 88.3912191,
+        "radius_m": 3000.0,
+        "polygon": [
+            [88.3712, 22.7726],
+            [88.4112, 22.7726],
+            [88.4112, 22.7326],
+            [88.3712, 22.7326],
+        ],
+    },
     "Mumbai Port Hub": {
         "lat": 18.9553,
         "lng": 72.8465,
@@ -323,7 +334,7 @@ def render_folium_fleet_map(
     zoom_level: int = 11,
     gkey: str = "",
 ) -> Dict[str, Any]:
-    """Renders light/colorful Folium basemap with interactive Draw plugin & telemetry markers."""
+    """Renders light/colorful Folium basemap with unified Draw plugin, persistent GeoJSON zones, & telemetry markers."""
     m = folium.Map(
         location=[center_lat, center_lng],
         zoom_start=int(zoom_level),
@@ -341,19 +352,33 @@ def render_folium_fleet_map(
             control=True,
         ).add_to(m)
 
-    # Add Folium Draw Plugin for interactive Polygon/Rectangle/Circle Geofencing
+    # Re-render persistent drawn geofence zones from session_state
+    saved_zones = st.session_state.get("captured_geofences")
+    if saved_zones:
+        folium.GeoJson(
+            saved_zones,
+            name="Active Geofences",
+            style_function=lambda x: {
+                "fillColor": "#ff4d4d",
+                "color": "#ff4d4d",
+                "weight": 2.5,
+                "fillOpacity": 0.25,
+            },
+        ).add_to(m)
+
+    # Unified Folium Draw Plugin (export=False, polygon/circle/rectangle)
     draw_plugin = Draw(
-        export=True,
+        export=False,
         position="topleft",
         draw_options={
             "polyline": False,
-            "polygon": True,
-            "circle": True,
-            "rectangle": True,
+            "polygon": True,   # Custom polygon zones
+            "circle": True,    # Radius zones
+            "rectangle": True, # Rectangular zones
             "marker": False,
             "circlemarker": False,
         },
-        edit_options={"edit": True, "remove": True},
+        edit_options={"edit": True, "remove": True}, # Enable resizing and deleting
     )
     draw_plugin.add_to(m)
 
@@ -495,21 +520,8 @@ def render_map_console() -> None:
         )
 
     with ctrl_col3:
-        enable_geofence = st.checkbox("Enable Geofencing Alert Zone", value=False)
-        geofence_preset = st.selectbox(
-            "Geofence Preset Zone",
-            options=list(HUB_PRESETS.keys()) + ["Custom Dynamic Circle"],
-            disabled=not enable_geofence,
-        )
-        geofence_radius_m = st.slider(
-            "Geofence Radius (Meters)",
-            min_value=100,
-            max_value=5000,
-            value=2000,
-            step=100,
-            disabled=not enable_geofence,
-            help="Dynamic radius for the geofence alert boundary.",
-        )
+        st.markdown("**Interactive Geofence Tool**")
+        st.caption("Use the map drawing toolbar (top-left on map) to draw, edit, or delete custom Polygons, Rectangles, or Circles.")
 
     # 4. Prepare PyDeck Map Data
     map_data_list: List[Dict[str, Any]] = []
@@ -539,7 +551,7 @@ def render_map_console() -> None:
         center_lng = float(df_map_nodes["lng"].mean())
         zoom_level = 11.0
     else:
-        center_lat, center_lng, zoom_level = 19.0760, 72.8777, 6.0
+        center_lat, center_lng, zoom_level = 22.7525975, 88.3912191, 11.0
 
     layers: List[pdk.Layer] = []
 
@@ -598,72 +610,6 @@ def render_map_console() -> None:
             f"Route History Loaded: Device **{history_device}** · "
             f"{len(df_route)} breadcrumb points rendered."
         )
-
-    # --- Geofence Layer & Breach Evaluation ---
-    breach_alerts: List[Dict[str, Any]] = []
-    if enable_geofence:
-        if geofence_preset in HUB_PRESETS:
-            preset = HUB_PRESETS[geofence_preset]
-            geo_polygon_lng_lat = preset["polygon"]
-            gf_lat, gf_lng = preset["lat"], preset["lng"]
-            radius_m = geofence_radius_m
-        else:
-            # Custom Dynamic Circle around current fleet center
-            gf_lat, gf_lng = center_lat, center_lng
-            radius_m = geofence_radius_m
-            geo_polygon_lng_lat = []
-
-        # Render Visual Geofence Circle Layer (Transparent Light Red)
-        circle_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=[{"lat": gf_lat, "lng": gf_lng, "radius": radius_m}],
-            get_position=["lng", "lat"],
-            get_fill_color=[255, 77, 77, 45],
-            get_line_color=[255, 77, 77, 220],
-            get_radius="radius",
-            line_width_min_pixels=2,
-            pickable=True,
-        )
-        layers.append(circle_layer)
-
-        if geo_polygon_lng_lat:
-            polygon_layer = pdk.Layer(
-                "PolygonLayer",
-                data=[{"polygon": geo_polygon_lng_lat}],
-                get_polygon="polygon",
-                get_fill_color=[53, 169, 255, 40],
-                get_line_color=[53, 169, 255, 220],
-                get_line_width=3,
-                line_width_min_pixels=2,
-                pickable=True,
-            )
-            layers.append(polygon_layer)
-
-        # Evaluate Geofence Breaches against dynamic radius
-        for snode in live_spatial_state.values():
-            if snode.lat != 0.0 and snode.lng != 0.0:
-                dist_to_center = haversine_distance_m(snode.lat, snode.lng, gf_lat, gf_lng)
-                if dist_to_center > radius_m:
-                    breach_alerts.append({
-                        "thing_name": snode.thing_name,
-                        "state": snode.state,
-                        "lat": snode.lat,
-                        "lng": snode.lng,
-                        "dist_km": round(dist_to_center / 1000.0, 2),
-                    })
-
-    # Render Visual Geofence Alerts if breaches occur
-    if breach_alerts:
-        st.warning(
-            f"GEOFENCE BREACH ALERT: {len(breach_alerts)} vehicle(s) detected "
-            f"OUTSIDE designated zone `{geofence_preset}`!",
-        )
-        with st.expander("View Breached Vehicles Details"):
-            st.dataframe(
-                pd.DataFrame(breach_alerts),
-                use_container_width=True,
-                hide_index=True,
-            )
 
     # PyDeck Interactive Tooltip (Styled to match dark glassmorphism theme)
     pydeck_tooltip = {
