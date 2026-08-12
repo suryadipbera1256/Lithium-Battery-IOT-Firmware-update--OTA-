@@ -1,0 +1,12 @@
+# --- Python env isolation (dashboard-local venv, never commit) ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# --- Secrets (CRITICAL: contains AWS keys + operator passwords) ---
+.streamlit/secrets.toml
+
+# --- Local artifacts ---
+*.bin
+.cache/

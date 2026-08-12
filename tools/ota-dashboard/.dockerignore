@@ -1,0 +1,25 @@
+# Keep credentials and bulk out of the build context entirely. Anything listed
+# here cannot end up in an image layer even by accident.
+.venv/
+**/__pycache__/
+*.py[cod]
+
+# CRITICAL: real secrets must never enter the context. Only the template ships.
+.streamlit/secrets.toml
+**/secrets.toml
+!.streamlit/secrets.toml.example
+
+# Not needed at runtime
+tests/
+docs/
+iam/
+run.ps1
+run.sh
+README.md
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Firmware artefacts, if any were staged here
+*.bin
+*.elf

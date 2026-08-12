@@ -1,0 +1,43 @@
+{
+  "_README": "AsOtaIotPresignRole — the role AWS IoT Core assumes to SIGN the S3 URL inside ${aws:iot:s3-presigned-url:...}. Referenced by [iot].presign_role_arn and passed to CreateJob as presignedUrlConfig.roleArn. Without this role the placeholder is delivered to the device VERBATIM and every OTA fails at AT+QHTTPGET with HTTP 403. Create with: aws iam create-role --role-name AsOtaIotPresignRole --assume-role-policy-document file://trust_policy --- then attach permissions_policy.",
+
+  "trust_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AllowIotToAssumeForUrlSigning",
+        "Effect": "Allow",
+        "Principal": { "Service": "iot.amazonaws.com" },
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "StringEquals": {
+            "aws:SourceAccount": "441464447047"
+          },
+          "ArnLike": {
+            "aws:SourceArn": "arn:aws:iot:ap-south-1:441464447047:job/as-ota-*"
+          }
+        }
+      }
+    ]
+  },
+
+  "permissions_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "SignFirmwareObjectsOnly",
+        "Comment": "GetObject on firmwares/ ONLY. Deliberately excludes jobs/ — the signing role has no reason to read job documents, and scoping it here means a leaked pre-signed URL can only ever expose a firmware image that is already being distributed to devices.",
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::as-ota-firmware/firmwares/*"
+      }
+    ]
+  },
+
+  "_NOTES": [
+    "The trust policy uses aws:SourceAccount + aws:SourceArn to prevent the confused-deputy problem: without them, any AWS account whose IoT jobs reference this role ARN could have IoT sign objects in your bucket.",
+    "aws:SourceArn is pinned to the as-ota-* job prefix, matching make_job_id() in core/jobs.py.",
+    "expiresInSec (presign_expires_sec, default 3600) starts when the DEVICE fetches the job document, not at CreateJob. It only has to outlast one download; the EC200U path is QHTTPREADFILE to UFS then chunked QFREAD, typically well under 10 minutes on LTE.",
+    "If the bucket is SSE-KMS encrypted, add kms:Decrypt on the CMK to permissions_policy, or the signed URL will return 403 at the device."
+  ]
+}

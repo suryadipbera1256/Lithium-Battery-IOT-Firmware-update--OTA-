@@ -1,0 +1,210 @@
+/* =========================================================
+   AS AI — OTA & Diagnostics Dashboard theme
+   ========================================================= */
+:root {
+  --bg: #0a0e14;
+  --panel: #121821;
+  --panel-2: #172030;
+  --line: #222d3d;
+  --txt: #e4e9f0;
+  --dim: #8b98ab;
+  --acc: #00e0a4;
+  --acc-2: #35a9ff;
+  --warn: #ffb340;
+  --bad: #ff5d6c;
+  --mono: "JetBrains Mono", "Cascadia Code", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.block-container { padding-top: 2.1rem; max-width: 1500px; }
+#MainMenu, footer { visibility: hidden; }
+
+h1, h2, h3 { letter-spacing: -0.02em; }
+
+/* ---------- login gate ---------- */
+.gate-wrap { text-align: center; margin: 4.5rem auto 1.6rem; }
+.gate-mark {
+  width: 62px; height: 62px; margin: 0 auto 1.1rem; border-radius: 16px;
+  display: grid; place-items: center;
+  font: 700 22px/1 var(--mono); color: #04120d; letter-spacing: 1px;
+  background: linear-gradient(135deg, var(--acc), var(--acc-2));
+  box-shadow: 0 10px 34px -10px rgba(0, 224, 164, .65);
+}
+/* Heading selectors are deliberately over-specified: Streamlit styles
+   headings inside stMarkdownContainer, which ties or beats a bare class. */
+.gate-wrap h1.gate-title { font-size: 1.72rem; margin: 0; font-weight: 650;
+                           padding: 0; line-height: 1.25; }
+.gate-wrap [data-testid="stHeaderActionElements"] { display: none; }
+.gate-sub {
+  color: var(--dim); font: 400 .78rem/1.5 var(--mono);
+  margin: .45rem 0 0; letter-spacing: .04em;
+}
+
+/* ---------- section header ---------- */
+.sec-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1rem; border-bottom: 1px solid var(--line);
+  padding-bottom: .7rem; margin: .2rem 0 1.25rem;
+}
+/* Descendant, NOT child, combinators: Streamlit wraps every heading in a
+   [data-testid="stHeadingWithActionElements"] div and appends an anchor-link
+   span, so `.sec-head > div > h2` never matches. Descendant form also gives
+   specificity (0,2,1), which beats Streamlit's `.st-emotion-cache-X h2`. */
+.sec-head h2.sec-title {
+  margin: 0; padding: 0; font-size: 1.24rem; font-weight: 640; line-height: 1.3;
+}
+.sec-head p.sec-sub {
+  margin: .28rem 0 0; color: var(--dim); font-size: .82rem; line-height: 1.5;
+}
+/* Hide the auto-injected heading anchor inside our custom section headers. */
+.sec-head [data-testid="stHeaderActionElements"] { display: none; }
+.sec-right { color: var(--dim); font: 400 .78rem/1.4 var(--mono); text-align: right; }
+
+/* ---------- stat cards ---------- */
+.stat-row {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  gap: .72rem; margin-bottom: 1.1rem;
+}
+.stat {
+  background: linear-gradient(160deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line); border-left: 3px solid var(--line);
+  border-radius: 11px; padding: .82rem .95rem;
+}
+.stat-l {
+  color: var(--dim); font: 500 .66rem/1 var(--mono);
+  text-transform: uppercase; letter-spacing: .11em;
+}
+.stat-v {
+  font: 650 1.58rem/1.2 var(--mono); margin-top: .38rem;
+  font-variant-numeric: tabular-nums;
+}
+.stat-s { color: var(--dim); font-size: .71rem; margin-top: .2rem; }
+.stat.ok   { border-left-color: var(--acc); }
+.stat.ok   .stat-v { color: var(--acc); }
+.stat.bad  { border-left-color: var(--bad); }
+.stat.bad  .stat-v { color: var(--bad); }
+.stat.warn { border-left-color: var(--warn); }
+.stat.warn .stat-v { color: var(--warn); }
+.stat.info { border-left-color: var(--acc-2); }
+.stat.info .stat-v { color: var(--acc-2); }
+
+/* ---------- status pills ---------- */
+.pill {
+  display: inline-block; padding: .17rem .55rem; border-radius: 999px;
+  font: 600 .66rem/1.45 var(--mono); letter-spacing: .07em;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.pill-ok   { color: #05150f; background: var(--acc); }
+.pill-run  { color: #04121e; background: var(--acc-2); }
+.pill-wait { color: var(--warn); background: rgba(255, 179, 64, .13); border-color: rgba(255, 179, 64, .4); }
+.pill-bad  { color: #fff; background: var(--bad); }
+.pill-mute { color: var(--dim); background: rgba(139, 152, 171, .13); border-color: var(--line); }
+
+/* ---------- key/value block ---------- */
+.kv {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px; overflow: hidden;
+}
+.kv-r {
+  display: flex; justify-content: space-between; gap: 1rem;
+  padding: .5rem .9rem; border-bottom: 1px solid var(--line); font-size: .82rem;
+}
+.kv-r:last-child { border-bottom: none; }
+.kv-k { color: var(--dim); }
+.kv-v { font-family: var(--mono); font-size: .78rem; text-align: right; word-break: break-all; }
+
+/* ---------- streamlit widget polish ---------- */
+div[data-testid="stMetricValue"] { font-family: var(--mono); }
+section[data-testid="stSidebar"] { border-right: 1px solid var(--line); }
+div[data-testid="stExpander"] details {
+  border: 1px solid var(--line); border-radius: 11px; background: var(--panel);
+}
+.stButton > button, .stDownloadButton > button {
+  border-radius: 9px; font-weight: 600; letter-spacing: .01em;
+}
+div[data-baseweb="tab-list"] { gap: .35rem; border-bottom: 1px solid var(--line); }
+button[data-baseweb="tab"] { font-weight: 600; letter-spacing: .01em; }
+code { font-family: var(--mono) !important; font-size: .8em; }
+.stProgress > div > div > div > div { background: linear-gradient(90deg, var(--acc-2), var(--acc)); }
+
+/* ---------- compact no-scroll sidebar layout ---------- */
+section[data-testid="stSidebar"] > div:first-child {
+  padding-top: 1rem !important;
+  padding-bottom: 0.8rem !important;
+  padding-left: 0.9rem !important;
+  padding-right: 0.9rem !important;
+}
+section[data-testid="stSidebar"] hr {
+  margin: 0.45rem 0 !important;
+}
+
+/* ---------- STREAMLIT SIDEBAR RADIO OVERHAUL (DOT-LESS BUTTONS) ---------- */
+section[data-testid="stSidebar"] div[role="radiogroup"] {
+  gap: 0.38rem !important;
+}
+
+/* Hide circular radio bullet */
+section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child,
+div[data-testid="stRadioButton"] label > div:first-child {
+  display: none !important;
+}
+
+/* Elongated full-width button styling for inactive items */
+section[data-testid="stSidebar"] div[role="radiogroup"] label {
+  display: flex !important;
+  align-items: center !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  background: var(--panel) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px !important;
+  padding: 0.65rem 0.95rem !important;
+  margin: 0 0 0.35rem 0 !important;
+  transition: all 0.18s ease-in-out !important;
+  cursor: pointer !important;
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] label div[data-testid="stMarkdownContainer"] p {
+  font-size: 0.92rem !important;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  margin: 0 !important;
+  color: var(--dim);
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+  border-color: var(--acc-2) !important;
+  background: var(--panel-2) !important;
+}
+
+/* Active/selected state with fixed distinct border and background highlight */
+section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
+section[data-testid="stSidebar"] div[role="radiogroup"] label[aria-checked="true"],
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+  border: 1px solid var(--acc) !important;
+  background: linear-gradient(135deg, rgba(0, 224, 164, 0.16), rgba(53, 169, 255, 0.08)) !important;
+  box-shadow: 0 0 10px rgba(0, 224, 164, 0.15) !important;
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] div[data-testid="stMarkdownContainer"] p,
+section[data-testid="stSidebar"] div[role="radiogroup"] label[aria-checked="true"] div[data-testid="stMarkdownContainer"] p,
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] p {
+  color: var(--acc) !important;
+  font-weight: 650 !important;
+}
+
+/* ---------- glowing text footer ---------- */
+.glow-text {
+  color: var(--acc) !important;
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(0, 224, 164, 0.5), 0 0 16px rgba(0, 224, 164, 0.25);
+}
+
+/* ---------- responsive telemetry card overflow protection ---------- */
+.card .kv span:last-child,
+.kv-v {
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  max-width: 100%;
+}

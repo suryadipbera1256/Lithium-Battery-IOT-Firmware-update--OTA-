@@ -1,0 +1,24 @@
+[theme]
+base = "dark"
+primaryColor = "#00E0A4"
+backgroundColor = "#0A0E14"
+secondaryBackgroundColor = "#121821"
+textColor = "#E4E9F0"
+font = "sans serif"
+
+[server]
+# Firmware .bin for a 1920 KB app slot; 32 MB ceiling is generous headroom.
+maxUploadSize = 32
+headless = true
+port = 8501
+address = "127.0.0.1"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[runner]
+fastReruns = true
