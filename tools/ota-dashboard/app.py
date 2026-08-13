@@ -82,36 +82,47 @@ def sidebar() -> str:
             label_visibility="collapsed",
         )
 
-        st.divider()
+        # Elastic gap: absorbs all vertical slack so everything below it is
+        # anchored to the bottom of the sidebar. Styled in static/theme.css
+        # (.sb-spacer) — flexbox push rather than absolute positioning, so a
+        # short viewport degrades to normal scrolling instead of overlap.
+        st.markdown('<div class="sb-spacer"></div>', unsafe_allow_html=True)
 
-        ident = identity()
-        r = role() or "-"
-        st.markdown(
-            f'<div style="background:#111823;border:1px solid #222d3d;border-radius:9px;padding:.65rem .75rem;font-size:.72rem;line-height:1.75;color:#8b98ab">'
-            f'ROLE <span style="color:#00e0a4;font-weight:600">{r.upper()}</span><br>'
-            f'REGION <span style="color:#e4e9f0">{CFG.region}</span><br>'
-            f'ACCOUNT <span style="color:#e4e9f0">{ident["account"]}</span><br>'
-            f'BUCKET <span style="color:#e4e9f0">{CFG.bucket or "unset"}</span><br>'
-            f'<div style="margin-top:.4rem;padding-top:.4rem;border-top:1px solid #1b2532">'
-            f'Developed by <span class="glow-text">Anish Adhikari</span> '
-            f'<span style="color: white; text-shadow: none; font-weight: normal;">&</span> '
-            f'<span class="glow-text">Suryadip Bera</span></div></div>',
-            unsafe_allow_html=True,
-        )
-        if not is_operator():
-            st.caption("Read-only role. Firmware upload and CreateJob are disabled.")
+        # System info, credits and actions share ONE container so a single CSS
+        # rule can pin the whole group. Streamlit gives containers no class of
+        # their own, hence the zero-height .sb-foot marker for :has() to select.
+        with st.container():
+            st.markdown('<div class="sb-foot"></div>', unsafe_allow_html=True)
+            st.divider()
 
-        st.divider()
+            ident = identity()
+            r = role() or "-"
+            st.markdown(
+                '<div class="sb-footer">'
+                f'<span class="sb-k">ROLE</span> <span class="sb-role">{r.upper()}</span><br>'
+                f'<span class="sb-k">REGION</span> <span class="sb-v">{CFG.region}</span><br>'
+                f'<span class="sb-k">ACCOUNT</span> <span class="sb-v">{ident["account"]}</span><br>'
+                f'<span class="sb-k">BUCKET</span> <span class="sb-v">{CFG.bucket or "unset"}</span>'
+                '<div class="sb-credit">Developed by '
+                '<span class="glow-text">Anish Adhikari</span>'
+                '<span style="color:#e4e9f0;text-shadow:none;font-weight:400"> &amp; </span>'
+                '<span class="glow-text">Suryadip Bera</span></div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
-        c1, c2 = st.columns(2)
-        if c1.button("Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        if c2.button("Sign out", use_container_width=True):
-            logout()
+            c1, c2 = st.columns(2)
+            if c1.button("Refresh", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+            if c2.button("Sign out", use_container_width=True):
+                logout()
 
-        if not CFG.configured:
-            st.error("Incomplete secrets: set [aws].region, [iot].endpoint, [s3].bucket.")
+            if not is_operator():
+                st.caption("Read-only role. Firmware upload and CreateJob are disabled.")
+            if not CFG.configured:
+                st.error("Incomplete secrets: set [aws].region, [iot].endpoint, "
+                         "[s3].bucket.")
 
     return page
 

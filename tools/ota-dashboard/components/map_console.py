@@ -1,23 +1,37 @@
-"""AS AI — Fleet Map Console (Spatial Tracking, History Playback, & Geofencing)
+"""AS AI — Fleet Map Console (Spatial Tracking, Route Playback, Geofencing)
 =============================================================================
-Fully isolated, modular component for real-time fleet geospatial rendering.
-Combines pydeck geospatial canvas, telemetry state engine, route playback,
-and spatial geofence breach evaluation.
+Isolated component for fleet geospatial rendering. Owns nothing outside this
+module: Firmware Registry, Deploy, Job Tracking and Live Telemetry are untouched.
+
+LAYOUT CONTRACT
+    Block A  Fleet status metrics          full width, top
+    Block B  Filtering & battery selection  control panel
+    Block C  Route playback (historical)    control panel
+    Block D  Geofencing & zone management   control panel
+    Map + fleet grid                        right pane
+
+ADDRESSES, NOT COORDINATES
+    The panel shows human-readable places (reverse-geocoded via Nominatim).
+    Exact lat/lng stays in the map popup/tooltip, where precision is actually
+    useful and does not compete with the rest of the UI for attention.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
-from components.ui import header, kv, pill, stat, stat_row
+from components.ui import header, stat, stat_row
 from core import fleet as fl
 
 try:
@@ -25,77 +39,64 @@ try:
     from folium.plugins import Draw
     from streamlit_folium import st_folium
     HAS_FOLIUM = True
-except ImportError:
+except ImportError:                                    # pragma: no cover
     HAS_FOLIUM = False
 
+try:
+    from geopy.geocoders import Nominatim
+    HAS_GEOPY = True
+except ImportError:                                    # pragma: no cover
+    HAS_GEOPY = False
+
+
 # ==============================================================================
-# 1. TYPE DEFINITIONS & CONSTANTS
+# 1. TYPES & CONSTANTS
 # ==============================================================================
 
 FleetState = Literal["Moving", "Stopped", "Idle", "Towing/Theft", "Offline"]
 
-# Color palette aligned with theme.css & directive rules
-# RGBA tuples for PyDeck, Hex strings for UI elements
+# (RGBA for PyDeck, hex for Folium/HTML) — single source for both renderers.
 STATE_COLORS: Dict[FleetState, Tuple[Tuple[int, int, int, int], str]] = {
-    "Moving": ((0, 224, 164, 220), "#00e0a4"),       # 🟢 Green
-    "Stopped": ((255, 93, 108, 220), "#ff5d6c"),     # 🔴 Red
-    "Idle": ((255, 179, 64, 220), "#ffb340"),        # 🟡 Yellow
-    "Towing/Theft": ((170, 80, 240, 220), "#aa50f0"),# 🟣 Purple
-    "Offline": ((139, 152, 171, 180), "#8b98ab"),    # ⚪ Gray
+    "Moving":       ((0, 224, 164, 220), "#00e0a4"),
+    "Stopped":      ((255, 93, 108, 220), "#ff5d6c"),
+    "Idle":         ((255, 179, 64, 220), "#ffb340"),
+    "Towing/Theft": ((170, 80, 240, 220), "#aa50f0"),
+    "Offline":      ((139, 152, 171, 180), "#8b98ab"),
+}
+ALL_STATES: List[FleetState] = list(STATE_COLORS)
+
+STATE_ICON = {
+    "Moving": "🟢", "Stopped": "🔴", "Idle": "🟡",
+    "Towing/Theft": "🟣", "Offline": "⚪",
 }
 
-# Pre-defined operational hubs for default locations & geofencing
 HUB_PRESETS: Dict[str, Dict[str, Any]] = {
-    "Kolkata R&D Hub": {
-        "lat": 22.7525975,
-        "lng": 88.3912191,
-        "radius_m": 3000.0,
-        "polygon": [
-            [88.3712, 22.7726],
-            [88.4112, 22.7726],
-            [88.4112, 22.7326],
-            [88.3712, 22.7326],
-        ],
-    },
-    "Mumbai Port Hub": {
-        "lat": 18.9553,
-        "lng": 72.8465,
-        "radius_m": 3500.0,
-        "polygon": [
-            [72.8300, 18.9700],
-            [72.8650, 18.9700],
-            [72.8650, 18.9350],
-            [72.8300, 18.9350],
-        ],
-    },
-    "Bengaluru Tech Depot": {
-        "lat": 12.9716,
-        "lng": 77.5946,
-        "radius_m": 4500.0,
-        "polygon": [
-            [77.5700, 12.9900],
-            [77.6200, 12.9900],
-            [77.6200, 12.9500],
-            [77.5700, 12.9500],
-        ],
-    },
-    "Delhi-NCR Corridor": {
-        "lat": 28.6139,
-        "lng": 77.2090,
-        "radius_m": 6000.0,
-        "polygon": [
-            [77.1700, 28.6400],
-            [77.2400, 28.6400],
-            [77.2400, 28.5800],
-            [77.1700, 28.5800],
-        ],
-    },
+    "Kolkata R&D Hub":    {"lat": 22.7525975, "lng": 88.3912191, "radius_m": 3000.0,
+                           "polygon": [[88.3712, 22.7726], [88.4112, 22.7726],
+                                       [88.4112, 22.7326], [88.3712, 22.7326]]},
+    "Mumbai Port Hub":    {"lat": 18.9553, "lng": 72.8465, "radius_m": 3500.0,
+                           "polygon": [[72.8300, 18.9700], [72.8650, 18.9700],
+                                       [72.8650, 18.9350], [72.8300, 18.9350]]},
+    "Bengaluru Tech Depot": {"lat": 12.9716, "lng": 77.5946, "radius_m": 4500.0,
+                           "polygon": [[77.5700, 12.9900], [77.6200, 12.9900],
+                                       [77.6200, 12.9500], [77.5700, 12.9500]]},
+    "Delhi-NCR Corridor": {"lat": 28.6139, "lng": 77.2090, "radius_m": 6000.0,
+                           "polygon": [[77.1700, 28.6400], [77.2400, 28.6400],
+                                       [77.2400, 28.5800], [77.1700, 28.5800]]},
 }
+
+DEFAULT_CENTER = (22.7525975, 88.3912191)
+STALE_AFTER_S = 120.0
+
+# session_state keys, declared once so nothing drifts
+K_CUSTOM_HUBS = "custom_hubs"        # name -> zone dict (drawn zones)
+K_SEEN_SHAPES = "map_seen_shapes"    # fingerprints already turned into zones
+K_ACTIVE_ZONE = "map_active_zone"    # selectbox value, so a new zone can preselect
 
 
 @dataclass(slots=True)
 class SpatialTelemetryNode:
-    """Structured spatial state for a single fleet vehicle."""
+    """Spatial state for one vehicle, with its operating state derived once."""
 
     thing_name: str
     lat: float
@@ -114,17 +115,12 @@ class SpatialTelemetryNode:
         self.evaluate_state()
 
     def evaluate_state(self) -> FleetState:
-        """Evaluates vehicle state according to exact directive rules:
-        - Moving (Green): Lat/lng changing AND Speed > 0.
-        - Stopped (Red): Lat/lng static AND BMS Current ≈ 0.
-        - Idle (Yellow): Lat/lng static AND BMS Current > 0.
-        - Towing/Theft (Purple): Lat/lng changing AND BMS Current == 0.
-        - Offline: Telemetry stale (> 120s) or device explicitly offline.
-        """
-        now = time.time()
-        age_s = now - self.last_seen_ts if self.last_seen_ts > 0 else 999999.0
+        """Moving: speed>0. Idle: static, current flowing. Stopped: static, no
+        current. Towing/Theft: moving with NO current — i.e. the pack is being
+        transported, not driven. Offline: stale or never seen."""
+        age_s = time.time() - self.last_seen_ts if self.last_seen_ts > 0 else 1e9
 
-        if not self.is_online or age_s > 120.0 or self.lat == 0.0 or self.lng == 0.0:
+        if not self.is_online or age_s > STALE_AFTER_S or not self.has_fix:
             self.state = "Offline"
         elif self.speed_kmh > 0.5 and abs(self.bms_current_a) < 0.1:
             self.state = "Towing/Theft"
@@ -135,668 +131,762 @@ class SpatialTelemetryNode:
         else:
             self.state = "Stopped"
 
-        rgba, hex_code = STATE_COLORS[self.state]
-        self.color_rgba = rgba
-        self.color_hex = hex_code
+        self.color_rgba, self.color_hex = STATE_COLORS[self.state]
         return self.state
+
+    @property
+    def has_fix(self) -> bool:
+        return self.lat != 0.0 and self.lng != 0.0
 
     @property
     def last_seen_str(self) -> str:
         if self.last_seen_ts <= 0:
             return "Never"
-        dt = datetime.fromtimestamp(self.last_seen_ts, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        return datetime.fromtimestamp(self.last_seen_ts, tz=timezone.utc) \
+                       .strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 # ==============================================================================
-# 2. GEOSPATIAL HELPER & ALGORITHM ENGINE
+# 2. GEOSPATIAL ENGINE
 # ==============================================================================
 
 def haversine_distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Calculates the great-circle distance between two GPS points in meters."""
-    try:
-        r_earth = 6371000.0  # Earth radius in meters
-        dlat = math.radians(lat2 - lat1)
-        dlng = math.radians(lng2 - lng1)
-        a = (
-            math.sin(dlat / 2.0) ** 2
-            + math.cos(math.radians(lat1))
-            * math.cos(math.radians(lat2))
-            * math.sin(dlng / 2.0) ** 2
-        )
-        c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-        return r_earth * c
-    except Exception:
-        return 0.0
+    """Great-circle distance in metres."""
+    r_earth = 6371000.0
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (math.sin(dlat / 2.0) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlng / 2.0) ** 2)
+    return r_earth * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
-def point_in_polygon(
-    lat: float, lng: float, polygon_lng_lat: List[List[float]]
-) -> bool:
-    """Ray-casting algorithm to test if a point (lng, lat) is inside a 2D polygon.
-
-    Args:
-        lat: Latitude of point
-        lng: Longitude of point
-        polygon_lng_lat: List of [longitude, latitude] pairs defining the closed polygon.
-    """
-    try:
-        n = len(polygon_lng_lat)
-        if n < 3:
-            return False
-        inside = False
-        p1lng, p1lat = polygon_lng_lat[0]
-        for i in range(n + 1):
-            p2lng, p2lat = polygon_lng_lat[i % n]
-            if lat > min(p1lat, p2lat):
-                if lat <= max(p1lat, p2lat):
-                    if lng <= max(p1lng, p2lng):
-                        if p1lat != p2lat:
-                            xinters = (lat - p1lat) * (p2lng - p1lng) / (
-                                p2lat - p1lat
-                            ) + p1lng
-                        else:
-                            xinters = p1lng
-                        if p1lng == p2lng or lng <= xinters:
-                            inside = not inside
-            p1lng, p1lat = p2lng, p2lat
-        return inside
-    except Exception:
+def point_in_polygon(lat: float, lng: float, polygon_lng_lat: List[List[float]]) -> bool:
+    """Ray casting. `polygon_lng_lat` is [[lng, lat], ...] (GeoJSON order)."""
+    n = len(polygon_lng_lat)
+    if n < 3:
         return False
+    inside = False
+    p1lng, p1lat = polygon_lng_lat[0]
+    for i in range(1, n + 1):
+        p2lng, p2lat = polygon_lng_lat[i % n]
+        if min(p1lat, p2lat) < lat <= max(p1lat, p2lat) and lng <= max(p1lng, p2lng):
+            if p1lat != p2lat:
+                xinters = (lat - p1lat) * (p2lng - p1lng) / (p2lat - p1lat) + p1lng
+            else:
+                xinters = p1lng
+            if p1lng == p2lng or lng <= xinters:
+                inside = not inside
+        p1lng, p1lat = p2lng, p2lat
+    return inside
 
+
+def zone_contains(zone: Dict[str, Any], lat: float, lng: float) -> bool:
+    """Polygon takes precedence over radius — the same precedence the renderer
+    uses, so what is drawn is exactly what is evaluated."""
+    poly = zone.get("polygon") or []
+    if len(poly) >= 3:
+        return point_in_polygon(lat, lng, poly)
+    return haversine_distance_m(lat, lng, zone.get("lat", 0.0),
+                                zone.get("lng", 0.0)) <= zone.get("radius_m", 0.0)
+
+
+def _stable_seed(text: str) -> int:
+    """Deterministic across processes.
+
+    Python salts str.__hash__ per interpreter (PYTHONHASHSEED), so seeding an
+    RNG with hash(name) produced a different synthetic fleet on every restart
+    despite the docstring promising determinism.
+    """
+    return int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
+
+
+# ==============================================================================
+# 3. REVERSE GEOCODING
+# ==============================================================================
+
+_GEO_PRECISION = 4          # ~11 m — GPS jitter must not mint new cache entries
+
+
+@st.cache_data(ttl=86_400, max_entries=1024, show_spinner=False)
+def reverse_geocode(lat_r: float, lng_r: float) -> str:
+    """Coordinates -> "Locality, Region". Empty string when unavailable.
+
+    Cached on ROUNDED coordinates and for a full day. Nominatim's usage policy
+    allows ~1 request/second, so callers must also keep the number of distinct
+    points small — see `resolve_place()`, which geocodes only the focused unit
+    rather than every marker on the map.
+    """
+    if not HAS_GEOPY:
+        return ""
+    try:
+        geocoder = Nominatim(user_agent="as-ai-fleet-ota-console/1.0", timeout=5)
+        loc = geocoder.reverse((lat_r, lng_r), exactly_one=True, language="en", zoom=14)
+        if not loc:
+            return ""
+        addr = getattr(loc, "raw", {}).get("address", {}) or {}
+        locality = next(
+            (addr[k] for k in ("suburb", "neighbourhood", "village", "town",
+                               "city_district", "city", "municipality", "county")
+             if addr.get(k)),
+            "",
+        )
+        region = addr.get("state") or addr.get("state_district") or ""
+        parts = [p for p in (locality, region) if p]
+        if parts:
+            return ", ".join(parts)
+        return str(loc.address).split(",")[0] if loc.address else ""
+    except Exception:
+        # Network hiccup / rate limit / DNS: never break the page for a label.
+        return ""
+
+
+def resolve_place(lat: float, lng: float) -> str:
+    """UI-facing wrapper: rounds, geocodes, and degrades gracefully."""
+    if lat == 0.0 and lng == 0.0:
+        return "No GPS fix"
+    place = reverse_geocode(round(lat, _GEO_PRECISION), round(lng, _GEO_PRECISION))
+    if place:
+        return place
+    return "Address unavailable" if HAS_GEOPY else "Geocoding disabled"
+
+
+# ==============================================================================
+# 4. SYNTHETIC DATA (until a telemetry history store exists)
+# ==============================================================================
 
 @st.cache_data(ttl=600, show_spinner=False)
-def generate_synthetic_spatial_fleet(
-    node_names: Tuple[str, ...]
-) -> Dict[str, Dict[str, Any]]:
-    """Generates realistic spatial telemetry snapshots for fleet nodes when live GPS
-    data is not actively streaming. Deterministic based on node name.
-    """
-    preset_keys = list(HUB_PRESETS.keys())
+def generate_synthetic_spatial_fleet(node_names: Tuple[str, ...]) -> Dict[str, Dict[str, Any]]:
+    """Plausible spatial snapshots for nodes with no live GPS in session state."""
+    preset_keys = list(HUB_PRESETS)
     spatial_db: Dict[str, Dict[str, Any]] = {}
     now = time.time()
 
     for idx, name in enumerate(node_names):
         hub = HUB_PRESETS[preset_keys[idx % len(preset_keys)]]
-        # Spread devices realistically around the hub center
-        random.seed(hash(name) & 0xFFFFFFFF)
-        lat_offset = random.uniform(-0.025, 0.025)
-        lng_offset = random.uniform(-0.025, 0.025)
-        state_roll = random.random()
+        rng = random.Random(_stable_seed(name))
+        roll = rng.random()
 
-        if state_roll < 0.35:  # Moving
-            speed = random.uniform(15.0, 65.0)
-            current = random.uniform(5.0, 35.0)
-        elif state_roll < 0.65:  # Stopped
-            speed = 0.0
-            current = 0.0
-        elif state_roll < 0.85:  # Idle
-            speed = 0.0
-            current = random.uniform(0.5, 4.0)
-        else:  # Towing / Theft edge case
-            speed = random.uniform(20.0, 45.0)
-            current = 0.0
+        if roll < 0.35:                      # Moving
+            speed, current = rng.uniform(15.0, 65.0), rng.uniform(5.0, 35.0)
+        elif roll < 0.65:                    # Stopped
+            speed, current = 0.0, 0.0
+        elif roll < 0.85:                    # Idle
+            speed, current = 0.0, rng.uniform(0.5, 4.0)
+        else:                                # Towing/Theft
+            speed, current = rng.uniform(20.0, 45.0), 0.0
 
         spatial_db[name] = {
-            "lat": hub["lat"] + lat_offset,
-            "lng": hub["lng"] + lng_offset,
+            "lat": hub["lat"] + rng.uniform(-0.025, 0.025),
+            "lng": hub["lng"] + rng.uniform(-0.025, 0.025),
             "speed_kmh": round(speed, 2),
             "bms_current_a": round(current, 2),
-            "bms_voltage_v": round(random.uniform(48.0, 54.6), 2),
-            "soc_pct": round(random.uniform(20.0, 98.0), 1),
-            "last_seen_ts": now - random.uniform(5.0, 90.0),
+            "bms_voltage_v": round(rng.uniform(48.0, 54.6), 2),
+            "soc_pct": round(rng.uniform(20.0, 98.0), 1),
+            "last_seen_ts": now - rng.uniform(5.0, 90.0),
         }
-
     return spatial_db
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def generate_historical_route_breadcrumbs(
-    thing_name: str, start_lat: float, start_lng: float, num_points: int = 40
+def generate_historical_route(
+    thing_name: str, start_lat: float, start_lng: float,
+    day_from: date, day_to: date, num_points: int = 48,
 ) -> pd.DataFrame:
-    """Generates a synthetic historical breadcrumb trail for route playback."""
-    points: List[Dict[str, Any]] = []
-    curr_lat = start_lat - 0.03
-    curr_lng = start_lng - 0.04
-    curr_ts = time.time() - 3600 * 4
+    """Breadcrumb trail spanning the requested window.
 
-    for i in range(num_points):
-        curr_lat += random.uniform(0.001, 0.003)
-        curr_lng += random.uniform(0.001, 0.003)
-        spd = random.uniform(10.0, 55.0) if i not in (0, num_points - 1) else 0.0
-        soc = max(15.0, 95.0 - (i * 1.5))
-        points.append(
-            {
-                "thing_name": thing_name,
-                "lat": curr_lat,
-                "lng": curr_lng,
-                "speed_kmh": round(spd, 1),
-                "soc_pct": round(soc, 1),
-                "timestamp": datetime.fromtimestamp(
-                    curr_ts + (i * 300), tz=timezone.utc
-                ).strftime("%H:%M:%S"),
-            }
-        )
-
-    return pd.DataFrame(points)
-
-
-# ==============================================================================
-# 3. FLEET MAP CONSOLE PAGE RENDERER
-# ==============================================================================
-
-def resolve_spatial_map_style() -> Tuple[Optional[str], bool, str]:
-    """Securely resolves map tile provider based on priority:
-    1. Google Maps (Authenticated Raster TileLayer)
-    2. Mapbox (Authenticated Dark Vector Basemap)
-    3. Carto Dark Matter (Open-Source Fallback)
-
-    Returns:
-        Tuple[Optional[str], bool, str]: (tile_url_or_style, is_tile_layer, provider_description)
+    Synthetic. Swap the body for a Timestream/S3 query when history is stored;
+    the return shape (lat, lng, speed_kmh, soc_pct, timestamp) is the contract
+    the renderer depends on.
     """
-    # Priority 1: Google Maps
-    gkey = ""
+    rng = random.Random(_stable_seed(f"{thing_name}{day_from}{day_to}"))
+    span_s = max((day_to - day_from).days + 1, 1) * 86_400
+    t0 = datetime.combine(day_from, datetime.min.time(), tzinfo=timezone.utc).timestamp()
+    step = span_s / max(num_points - 1, 1)
+
+    rows: List[Dict[str, Any]] = []
+    lat, lng = start_lat - 0.03, start_lng - 0.04
+    for i in range(num_points):
+        lat += rng.uniform(0.0008, 0.0030)
+        lng += rng.uniform(0.0008, 0.0030)
+        moving = i not in (0, num_points - 1)
+        rows.append({
+            "thing_name": thing_name,
+            "lat": lat,
+            "lng": lng,
+            "speed_kmh": round(rng.uniform(10.0, 55.0) if moving else 0.0, 1),
+            "soc_pct": round(max(15.0, 95.0 - i * (80.0 / num_points)), 1),
+            "timestamp": datetime.fromtimestamp(t0 + i * step, tz=timezone.utc)
+                                 .strftime("%d %b %H:%M"),
+        })
+    return pd.DataFrame(rows)
+
+
+# ==============================================================================
+# 5. GEOFENCE CAPTURE
+# ==============================================================================
+
+def geojson_to_zone(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Leaflet-Draw GeoJSON -> the internal zone dict.
+
+    Circles arrive as a Point with `properties.radius` (metres); polygons and
+    rectangles as a Polygon whose first ring is already [lng, lat].
+    """
     try:
-        if "gmaps" in st.secrets and "api_key" in st.secrets["gmaps"]:
-            gkey = st.secrets["gmaps"]["api_key"].strip()
-    except Exception:
+        geom = feature.get("geometry", {}) or {}
+        props = feature.get("properties", {}) or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates")
+
+        if gtype == "Point" and coords:
+            lng, lat = float(coords[0]), float(coords[1])
+            radius = float(props.get("radius") or 1000.0)
+            return {"lat": lat, "lng": lng, "radius_m": radius, "polygon": []}
+
+        if gtype == "Polygon" and coords:
+            ring = [[float(p[0]), float(p[1])] for p in coords[0]]
+            if len(ring) >= 3:
+                # Leaflet closes the ring; drop the duplicate final vertex so the
+                # ray-casting wrap-around does not count that edge twice.
+                if ring[0] == ring[-1]:
+                    ring = ring[:-1]
+                lat_c = sum(p[1] for p in ring) / len(ring)
+                lng_c = sum(p[0] for p in ring) / len(ring)
+                return {"lat": lat_c, "lng": lng_c, "radius_m": 0.0, "polygon": ring}
+    except (TypeError, ValueError, IndexError, KeyError):
         pass
-    if not gkey:
-        gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
-
-    if gkey:
-        tile_url = f"https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&key={gkey}"
-        return tile_url, True, "Google Maps High-Res Tiles (Priority 1 - Authenticated)"
-
-    # Priority 2: Mapbox
-    mkey = ""
-    try:
-        if "mapbox" in st.secrets and "api_token" in st.secrets["mapbox"]:
-            mkey = st.secrets["mapbox"]["api_token"].strip()
-    except Exception:
-        pass
-    if not mkey:
-        mkey = os.getenv("MAPBOX_API_TOKEN", "").strip()
-
-    if mkey:
-        pdk.settings.mapbox_api_key = mkey
-        return "mapbox://styles/mapbox/dark-v10", False, "Mapbox Dark Vector (Priority 2 - Authenticated)"
-
-    # Priority 3: Carto Dark Matter Fallback
-    return "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json", False, "Carto Dark Matter (Priority 3 - Open-source Fallback)"
+    return None
 
 
-def render_folium_fleet_map(
-    live_spatial_state: Dict[str, SpatialTelemetryNode],
-    selected_states: List[str],
-    center_lat: float,
-    center_lng: float,
-    zoom_level: int = 11,
-    gkey: str = "",
+def zone_summary(zone: Dict[str, Any]) -> str:
+    poly = zone.get("polygon") or []
+    if len(poly) >= 3:
+        return f"Polygon · {len(poly)} vertices"
+    return f"Circle · {int(zone.get('radius_m', 0))} m radius"
+
+
+def shape_fingerprint(feature: Dict[str, Any]) -> str:
+    """Stable identity for a drawn shape.
+
+    st_folium replays `all_drawings` on EVERY rerun, so identity is what stops a
+    shape from being re-imported forever. Derived from the geometry itself (plus
+    the circle radius, which lives in properties and is the only thing
+    distinguishing two concentric circles) — never from list position, because
+    deleting one shape on the map would renumber the rest and re-import them all.
+    """
+    geom = feature.get("geometry", {}) or {}
+    radius = (feature.get("properties", {}) or {}).get("radius")
+    payload = json.dumps(
+        {"g": geom, "r": round(float(radius), 3) if radius is not None else None},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode()).hexdigest()[:16]
+
+
+def sync_drawn_zones(drawings: Optional[List[Dict[str, Any]]]) -> List[str]:
+    """Import newly drawn shapes into `custom_hubs`. Returns the names created.
+
+    Idempotent by fingerprint, which is what keeps this free of rerun loops: the
+    first pass creates the zone and records the fingerprint, every later pass
+    sees a known fingerprint and does nothing, so the caller's `st.rerun()` fires
+    exactly once per drawn shape.
+
+    Additions only. A shape removed with the map's trash tool leaves its saved
+    zone intact — deletion is an explicit action in the Manage tab, so a stray
+    click on the map cannot silently drop a monitoring zone.
+    """
+    if not drawings:
+        return []
+
+    custom: Dict[str, Dict[str, Any]] = st.session_state.setdefault(K_CUSTOM_HUBS, {})
+    seen: set = st.session_state.setdefault(K_SEEN_SHAPES, set())
+    created: List[str] = []
+
+    for feature in drawings:
+        fp = shape_fingerprint(feature)
+        if fp in seen:
+            continue
+        zone = geojson_to_zone(feature)
+        seen.add(fp)                       # mark even on failure: never retry a bad shape
+        if not zone:
+            continue
+        n = len(custom) + 1
+        while f"Custom Zone {n}" in custom:
+            n += 1
+        name = f"Custom Zone {n}"
+        zone["fingerprint"] = fp
+        custom[name] = zone
+        created.append(name)
+
+    return created
+
+
+# ==============================================================================
+# 6. MAP RENDERERS
+# ==============================================================================
+
+def _marker_popup(node: SpatialTelemetryNode, place: str) -> str:
+    """All precise technical data lives here, not in the control panel."""
+    rows = [
+        ("State", f"<span style='color:{node.color_hex};font-weight:700'>"
+                  f"{STATE_ICON[node.state]} {node.state}</span>"),
+        ("Location", place or "—"),
+        ("Latitude", f"{node.lat:.7f}"),
+        ("Longitude", f"{node.lng:.7f}"),
+        ("Speed", f"{node.speed_kmh:.1f} km/h"),
+        ("SOC", f"{node.soc_pct:.1f} %"),
+        ("Voltage", f"{node.bms_voltage_v:.2f} V"),
+        ("Current", f"{node.bms_current_a:.2f} A"),
+        ("Last seen", node.last_seen_str),
+    ]
+    body = "".join(
+        f"<tr><td style='color:#8b98ab;padding:2px 10px 2px 0;white-space:nowrap'>{k}</td>"
+        f"<td style='color:#e4e9f0;font-weight:600'>{v}</td></tr>"
+        for k, v in rows
+    )
+    return (
+        "<div style=\"font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;"
+        "min-width:230px\">"
+        f"<div style='font-size:13px;font-weight:700;color:#35a9ff;margin-bottom:6px'>"
+        f"{node.thing_name}</div><table style='border-collapse:collapse'>{body}</table></div>"
+    )
+
+
+def render_folium_map(
+    nodes: Dict[str, SpatialTelemetryNode],
+    visible_states: List[str],
+    center: Tuple[float, float],
+    zoom: int,
+    active_zone: Optional[Dict[str, Any]],
+    active_zone_name: str,
+    route: Optional[pd.DataFrame],
+    focus_place: str,
+    focus_name: str,
 ) -> Dict[str, Any]:
-    """Renders light/colorful Folium basemap with unified Draw plugin, persistent GeoJSON zones, & telemetry markers."""
-    m = folium.Map(
-        location=[center_lat, center_lng],
-        zoom_start=int(zoom_level),
-        tiles="OpenStreetMap",
-    )
+    """Interactive basemap with draw tools, zone overlay and route playback."""
+    fmap = folium.Map(location=list(center), zoom_start=int(zoom),
+                      tiles="cartodbpositron", control_scale=True)
 
-    # Add Google Maps High-Res Light Roadmap TileLayer if authenticated
+    gkey = _google_maps_key()
     if gkey:
-        gmaps_tile_url = f"https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&key={gkey}"
         folium.TileLayer(
-            tiles=gmaps_tile_url,
-            attr="Google Maps Roadmap",
-            name="Google Maps Roadmap",
-            overlay=False,
-            control=True,
-        ).add_to(m)
+            tiles=f"https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&key={gkey}",
+            attr="Google Maps", name="Google Roadmap", overlay=False, control=True,
+        ).add_to(fmap)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(fmap)
 
-    # Re-render persistent drawn geofence zones from session_state
-    saved_zones = st.session_state.get("captured_geofences")
-    if saved_zones:
-        folium.GeoJson(
-            saved_zones,
-            name="Active Geofences",
-            style_function=lambda x: {
-                "fillColor": "#ff4d4d",
-                "color": "#ff4d4d",
-                "weight": 2.5,
-                "fillOpacity": 0.25,
-            },
-        ).add_to(m)
+    if active_zone:
+        poly = active_zone.get("polygon") or []
+        if len(poly) >= 3:
+            folium.Polygon(
+                locations=[[p[1], p[0]] for p in poly],
+                color="#35a9ff", fill=True, fill_color="#35a9ff",
+                fill_opacity=0.18, weight=2.5,
+                tooltip=f"Zone: {active_zone_name} ({zone_summary(active_zone)})",
+            ).add_to(fmap)
+        elif active_zone.get("radius_m"):
+            folium.Circle(
+                location=[active_zone["lat"], active_zone["lng"]],
+                radius=active_zone["radius_m"],
+                color="#35a9ff", fill=True, fill_color="#35a9ff",
+                fill_opacity=0.15, weight=2.5,
+                tooltip=f"Zone: {active_zone_name} ({zone_summary(active_zone)})",
+            ).add_to(fmap)
 
-    # Unified Folium Draw Plugin (export=False, polygon/circle/rectangle)
-    draw_plugin = Draw(
-        export=False,
-        position="topleft",
-        draw_options={
-            "polyline": False,
-            "polygon": True,   # Custom polygon zones
-            "circle": True,    # Radius zones
-            "rectangle": True, # Rectangular zones
-            "marker": False,
-            "circlemarker": False,
-        },
-        edit_options={"edit": True, "remove": True}, # Enable resizing and deleting
-    )
-    draw_plugin.add_to(m)
-
-    # Add Telemetry Circle Markers with Popups & Tooltips
-    for snode in live_spatial_state.values():
-        if snode.state in selected_states and snode.lat != 0.0 and snode.lng != 0.0:
-            popup_html = (
-                f"<div style='font-family:sans-serif;font-size:12px;min-width:160px;'>"
-                f"<b>Device:</b> {snode.thing_name}<br/>"
-                f"<b>State:</b> <span style='color:{snode.color_hex};font-weight:bold;'>{snode.state}</span><br/>"
-                f"<b>Speed:</b> {snode.speed_kmh} km/h<br/>"
-                f"<b>SOC:</b> {snode.soc_pct}%<br/>"
-                f"<b>Voltage:</b> {snode.bms_voltage_v} V<br/>"
-                f"<b>Last Seen:</b> {snode.last_seen_str}"
-                f"</div>"
-            )
+    if route is not None and not route.empty:
+        folium.PolyLine(route[["lat", "lng"]].values.tolist(),
+                        color="#ffb340", weight=4, opacity=0.9,
+                        tooltip=f"Route · {focus_name}").add_to(fmap)
+        for _, r in route.iloc[::6].iterrows():
             folium.CircleMarker(
-                location=[snode.lat, snode.lng],
-                radius=8,
-                color="#ffffff",
-                weight=1.5,
-                fill=True,
-                fill_color=snode.color_hex,
-                fill_opacity=0.9,
-                popup=folium.Popup(popup_html, max_width=260),
-                tooltip=f"{snode.thing_name} ({snode.state})",
-            ).add_to(m)
+                location=[r["lat"], r["lng"]], radius=3.5,
+                color="#ffb340", fill=True, fill_color="#0e131b", fill_opacity=1.0,
+                tooltip=f"{r['timestamp']} · {r['speed_kmh']} km/h · SOC {r['soc_pct']}%",
+            ).add_to(fmap)
 
-    folium.LayerControl().add_to(m)
-    return st_folium(m, width="100%", height=520, key="fleet_folium_draw_map")
+    for node in nodes.values():
+        if node.state not in visible_states or not node.has_fix:
+            continue
+        # Geocode only the focused unit: every marker would mean N Nominatim
+        # calls per rerun, far past its 1 req/s policy.
+        place = focus_place if node.thing_name == focus_name else ""
+        folium.CircleMarker(
+            location=[node.lat, node.lng],
+            radius=9 if node.thing_name == focus_name else 7,
+            color="#ffffff", weight=2.0 if node.thing_name == focus_name else 1.2,
+            fill=True, fill_color=node.color_hex, fill_opacity=0.92,
+            popup=folium.Popup(_marker_popup(node, place), max_width=300),
+            tooltip=f"{STATE_ICON[node.state]} {node.thing_name} · {node.state}",
+        ).add_to(fmap)
 
+    Draw(
+        export=False, position="topleft",
+        draw_options={"polyline": False, "polygon": True, "circle": True,
+                      "rectangle": True, "marker": False, "circlemarker": False},
+        edit_options={"edit": True, "remove": True},
+    ).add_to(fmap)
+    folium.LayerControl(collapsed=True).add_to(fmap)
 
-def render_map_console() -> None:
-    """Renders the isolated Fleet Map Console tab / page."""
-    header(
-        "Fleet Spatial Map & Geofence Console",
-        "Real-time geospatial fleet monitoring, state-classified node tracking, "
-        "historical breadcrumb route playback, and polygon geofence alerts.",
-        right="PyDeck Spatial Engine · Dual Location (GNSS/LBS)",
+    # `center`/`zoom` are passed as parameters rather than baked into the key, so
+    # re-centering on a new target does not discard the user's drawn shapes.
+    return st_folium(
+        fmap, key="fleet_map", height=560, use_container_width=True,
+        center=list(center), zoom=int(zoom),
+        returned_objects=["all_drawings", "last_active_drawing"],
     )
 
-    # 1. Fetch Fleet Nodes & Merge Spatial State
-    fleet_info = fl.discover()
-    if fleet_info.error:
-        st.error(f"Fleet spatial discovery error: {fleet_info.error}", icon="⛔")
-        st.stop()
-        return
 
-    nodes_tuple = fleet_info.names
-    if not nodes_tuple:
-        st.info("No nodes registered in the fleet. Provision devices to enable spatial tracking.")
-        return
+def _google_maps_key() -> str:
+    try:
+        key = st.secrets.get("gmaps", {}).get("api_key", "")
+    except Exception:
+        key = ""
+    return (key or os.getenv("GOOGLE_MAPS_API_KEY", "")).strip()
 
-    # Retrieve or initialize spatial telemetry buffer from session_state
-    synth_db = generate_synthetic_spatial_fleet(nodes_tuple)
-    live_spatial_state: Dict[str, SpatialTelemetryNode] = {}
+
+def render_pydeck_map(
+    frame: pd.DataFrame, center: Tuple[float, float], zoom: float,
+    active_zone: Optional[Dict[str, Any]], route: Optional[pd.DataFrame],
+) -> None:
+    """Fallback canvas when folium/streamlit-folium are unavailable."""
+    layers: List[pdk.Layer] = []
+
+    if active_zone:
+        poly = active_zone.get("polygon") or []
+        if len(poly) >= 3:
+            layers.append(pdk.Layer(
+                "PolygonLayer", data=[{"polygon": poly}], get_polygon="polygon",
+                get_fill_color=[53, 169, 255, 40], get_line_color=[53, 169, 255, 220],
+                line_width_min_pixels=2, pickable=False))
+        elif active_zone.get("radius_m"):
+            layers.append(pdk.Layer(
+                "ScatterplotLayer",
+                data=[{"lat": active_zone["lat"], "lng": active_zone["lng"],
+                       "radius": active_zone["radius_m"]}],
+                get_position=["lng", "lat"], get_fill_color=[53, 169, 255, 45],
+                get_radius="radius", pickable=False))
+
+    if route is not None and not route.empty:
+        layers.append(pdk.Layer(
+            "PathLayer", data=[{"path": route[["lng", "lat"]].values.tolist()}],
+            get_path="path", get_color=[255, 179, 64, 230], width_min_pixels=4))
+
+    if not frame.empty:
+        layers.append(pdk.Layer(
+            "ScatterplotLayer", data=frame, get_position=["lng", "lat"],
+            get_fill_color="color_rgba", get_line_color=[255, 255, 255, 200],
+            get_radius=140, radius_min_pixels=7, radius_max_pixels=18,
+            line_width_min_pixels=1.5, pickable=True, auto_highlight=True))
+
+    st.pydeck_chart(pdk.Deck(
+        layers=layers,
+        initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1],
+                                         zoom=zoom, pitch=0),
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        tooltip={
+            "html": ("<b>{thing_name}</b><br/>{state}<br/>"
+                     "Lat {lat} · Lng {lng}<br/>"
+                     "SOC {soc}% · {voltage} V · {current} A<br/>{speed} km/h"),
+            "style": {"backgroundColor": "#121821", "color": "#e4e9f0",
+                      "fontSize": "12px", "borderRadius": "8px",
+                      "fontFamily": "JetBrains Mono, monospace"},
+        },
+    ), use_container_width=True)
+
+
+# ==============================================================================
+# 7. STATE ASSEMBLY
+# ==============================================================================
+
+def build_spatial_state(fleet_info: Any) -> Dict[str, SpatialTelemetryNode]:
+    """Live telemetry from session_state when present, synthetic otherwise."""
+    synth = generate_synthetic_spatial_fleet(fleet_info.names)
+    out: Dict[str, SpatialTelemetryNode] = {}
 
     for node in fleet_info.nodes:
-        # Check if live telemetry data exists in session_state or fallback to synth_db
-        node_live = st.session_state.get(f"telemetry_last_{node.name}") or synth_db.get(node.name)
-        
-        if node_live and isinstance(node_live, dict):
-            lat = float(node_live.get("lat") or node_live.get("latitude") or 0.0)
-            lng = float(node_live.get("lng") or node_live.get("longitude") or 0.0)
-            spd = float(node_live.get("speed_kmh") or node_live.get("speed") or 0.0)
-            curr = float(node_live.get("bms_current_a") or node_live.get("current") or 0.0)
-            volt = float(node_live.get("bms_voltage_v") or node_live.get("voltage") or 0.0)
-            soc = float(node_live.get("soc_pct") or node_live.get("soc") or 0.0)
-            ts = float(node_live.get("last_seen_ts") or node_live.get("timestamp") or time.time())
-            
-            spatial_node = SpatialTelemetryNode(
+        raw = st.session_state.get(f"telemetry_last_{node.name}") or synth.get(node.name)
+        if isinstance(raw, dict):
+            out[node.name] = SpatialTelemetryNode(
                 thing_name=node.name,
-                lat=lat,
-                lng=lng,
-                speed_kmh=spd,
-                bms_current_a=curr,
-                bms_voltage_v=volt,
-                soc_pct=soc,
-                last_seen_ts=ts,
+                lat=float(raw.get("lat") or raw.get("latitude") or 0.0),
+                lng=float(raw.get("lng") or raw.get("longitude") or 0.0),
+                speed_kmh=float(raw.get("speed_kmh") or raw.get("speed") or 0.0),
+                bms_current_a=float(raw.get("bms_current_a") or raw.get("current") or 0.0),
+                bms_voltage_v=float(raw.get("bms_voltage_v") or raw.get("voltage") or 0.0),
+                soc_pct=float(raw.get("soc_pct") or raw.get("soc") or 0.0),
+                last_seen_ts=float(raw.get("last_seen_ts") or raw.get("timestamp") or time.time()),
                 is_online=(node.connected is not False),
             )
         else:
-            spatial_node = SpatialTelemetryNode(
-                thing_name=node.name,
-                lat=0.0,
-                lng=0.0,
-                speed_kmh=0.0,
-                bms_current_a=0.0,
-                bms_voltage_v=0.0,
-                soc_pct=0.0,
-                last_seen_ts=0.0,
-                is_online=False,
-            )
-        live_spatial_state[node.name] = spatial_node
+            out[node.name] = SpatialTelemetryNode(
+                thing_name=node.name, lat=0.0, lng=0.0, speed_kmh=0.0,
+                bms_current_a=0.0, bms_voltage_v=0.0, soc_pct=0.0,
+                last_seen_ts=0.0, is_online=False)
+    return out
 
-    # 2. Compute Fleet KPI Counts
-    counts: Dict[FleetState, int] = {
-        "Moving": 0,
-        "Stopped": 0,
-        "Idle": 0,
-        "Towing/Theft": 0,
-        "Offline": 0,
-    }
-    for snode in live_spatial_state.values():
-        counts[snode.state] += 1
 
-    total_fleet = len(nodes_tuple)
-
-    # Render Directive-Compliant Horizontal KPI Summary Bar
-    stat_row([
-        stat("Total Fleet", str(total_fleet), "registered units", tone="info"),
-        stat("Moving", str(counts["Moving"]), "speed > 0 & active", tone="ok"),
-        stat("Stopped", str(counts["Stopped"]), "static & current ≈ 0", tone="bad"),
-        stat("Idle", str(counts["Idle"]), "static & current > 0", tone="warn"),
-        stat("Towing / Theft", str(counts["Towing/Theft"]), "speed > 0 & current = 0", tone="bad" if counts["Towing/Theft"] > 0 else ""),
-        stat("Offline", str(counts["Offline"]), "no recent telemetry", tone="mute" if counts["Offline"] == 0 else "warn"),
+def nodes_to_frame(nodes: Dict[str, SpatialTelemetryNode],
+                   visible_states: List[str]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"thing_name": n.thing_name, "lat": round(n.lat, 7), "lng": round(n.lng, 7),
+         "speed": n.speed_kmh, "current": n.bms_current_a, "voltage": n.bms_voltage_v,
+         "soc": n.soc_pct, "state": n.state, "color_rgba": list(n.color_rgba),
+         "last_seen_str": n.last_seen_str}
+        for n in nodes.values()
+        if n.state in visible_states and n.has_fix
     ])
 
-    # ==========================================================================
-    # 3. CONTROL PANEL: FILTER, ROUTE PLAYBACK & GEOFENCE CONTROLS
-    # ==========================================================================
-    st.markdown("##### Spatial Filters & Analysis Controls")
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.1, 1.2, 1.2])
 
-    with ctrl_col1:
-        selected_states = st.multiselect(
-            "Filter Map States",
-            options=["Moving", "Stopped", "Idle", "Towing/Theft", "Offline"],
-            default=["Moving", "Stopped", "Idle", "Towing/Theft", "Offline"],
-            help="Filter map markers by calculated device state.",
+# ==============================================================================
+# 8. CONTROL PANEL BLOCKS
+# ==============================================================================
+
+def compact_metrics(items: List[Tuple[str, str, str]]) -> None:
+    """Small label/value strip.
+
+    Replaces st.metric here rather than shrinking it with CSS: overriding
+    stMetricValue/stMetricLabel would also shrink the metrics on Job Tracking and
+    Live Telemetry, which are out of scope and look correct as they are.
+    `items` is (label, value, colour-or-empty).
+    """
+    cells = "".join(
+        f'<div class="cm-cell"><div class="cm-l">{label}</div>'
+        f'<div class="cm-v"{f" style=color:{tone}" if tone else ""}>{value}</div></div>'
+        for label, value, tone in items
+    )
+    st.markdown(f'<div class="cm-row">{cells}</div>', unsafe_allow_html=True)
+
+
+def _block_b_filters(node_names: Tuple[str, ...],
+                     counts: Dict[str, int]) -> Tuple[List[str], str]:
+    st.markdown("#### 🔎 Filtering & Selection")
+    visible = st.multiselect(
+        "Filter by state",
+        options=ALL_STATES, default=ALL_STATES,
+        format_func=lambda s: f"{STATE_ICON[s]}  {s}  ({counts.get(s, 0)})",
+        help="Hides markers whose derived state is not selected.",
+    )
+    focus = st.selectbox(
+        "Select target battery",
+        options=["All Fleet Vehicles", *node_names],
+        help="Locks the map onto one unit and resolves its street address.",
+    )
+    return (visible or ALL_STATES), focus
+
+
+def _block_c_playback(focus: str) -> Tuple[bool, date, date]:
+    st.markdown("#### 🛣️ Route Playback")
+    if focus == "All Fleet Vehicles":
+        st.caption("Select a single battery in **Filtering & Selection** to enable "
+                   "historical playback.")
+        return False, date.today(), date.today()
+
+    enabled = st.toggle("Draw historical route", value=False,
+                        help="Overlays the breadcrumb trail for the window below.")
+    today = date.today()
+    span = st.date_input(
+        "Date range", value=(today - timedelta(days=1), today),
+        max_value=today, disabled=not enabled,
+    )
+    if isinstance(span, tuple) and len(span) == 2:
+        d_from, d_to = span
+    else:                                   # mid-edit: only one date picked yet
+        d_from = d_to = span if isinstance(span, date) else today
+    return enabled, d_from, d_to
+
+
+def _block_d_geofencing() -> Tuple[str, Dict[str, Any]]:
+    """Active-zone selection + management.
+
+    There is no "add" form. Zones are created by drawing on the map and are
+    imported by `sync_drawn_zones()`; both widgets below read straight from
+    session state, so a shape drawn on the map appears here on the same rerun.
+    """
+    st.markdown("#### 🛡️ Geofencing & Zones")
+    custom: Dict[str, Dict[str, Any]] = st.session_state.setdefault(K_CUSTOM_HUBS, {})
+    all_zones = {**HUB_PRESETS, **custom}
+
+    labels = {f"📌 {n}": n for n in HUB_PRESETS}
+    labels.update({f"⚡ {n}": n for n in custom})
+    label_of = {v: k for k, v in labels.items()}
+
+    tab_active, tab_manage = st.tabs(["Active", f"Manage ({len(custom)})"])
+
+    with tab_active:
+        # A freshly drawn zone preselects itself; the widget key keeps the choice
+        # stable across the reruns that map interaction triggers.
+        wanted = st.session_state.get(K_ACTIVE_ZONE)
+        options = list(labels)
+        index = options.index(label_of[wanted]) if wanted in label_of else 0
+        picked = st.selectbox(
+            "Active monitoring zone", options=options, index=index,
+            help="Vehicles outside this zone raise a breach alert.",
         )
+        zone_name = labels[picked]
+        st.session_state[K_ACTIVE_ZONE] = zone_name
+        zone = all_zones[zone_name]
+        st.caption(f"{zone_summary(zone)} · centre {resolve_place(zone['lat'], zone['lng'])}")
+        st.caption("✏️ Draw a circle, polygon or rectangle with the map toolbar to "
+                   "add a zone — it is saved and selectable immediately.")
 
-    with ctrl_col2:
-        enable_history = st.checkbox("Route History Playback", value=False)
-        history_device = st.selectbox(
-            "Select Device for History",
-            options=nodes_tuple,
-            disabled=not enable_history,
-        )
-
-    # Dynamic Custom Hub Storage in Session State
-    if "custom_hubs" not in st.session_state:
-        st.session_state["custom_hubs"] = {}
-
-    all_hubs = {**HUB_PRESETS, **st.session_state["custom_hubs"]}
-
-    with ctrl_col3:
-        enable_geofence = st.checkbox("Enable Active Geofence Alert Zone", value=True)
-        selected_zone_name = st.selectbox(
-            "Active Monitoring Zone",
-            options=list(all_hubs.keys()),
-            index=0 if "Kolkata R&D Hub" in all_hubs else 0,
-            disabled=not enable_geofence,
-        )
-
-        with st.expander("➕ Add / Manage Geofence Zone"):
-            st.caption("Define a new operational hub or custom alert boundary.")
-            new_zone_name = st.text_input("Zone Name", value="Kolkata R&D Center")
-            zone_type = st.radio("Boundary Shape", ("Circle (Radius)", "Polygon (Custom Area)"), horizontal=True)
-
-            z_col1, z_col2 = st.columns(2)
-            new_lat = z_col1.number_input("Center Latitude", value=22.7525975, format="%.7f")
-            new_lng = z_col2.number_input("Center Longitude", value=88.3912191, format="%.7f")
-
-            if zone_type == "Circle (Radius)":
-                new_radius = st.slider("Radius (Meters)", min_value=100, max_value=10000, value=3000, step=100)
-                new_poly = []
-            else:
-                new_radius = 3000.0
-                d = 0.02
-                new_poly = [
-                    [new_lng - d, new_lat + d],
-                    [new_lng + d, new_lat + d],
-                    [new_lng + d, new_lat - d],
-                    [new_lng - d, new_lat - d],
-                ]
-
-            add_c1, add_c2 = st.columns(2)
-            if add_c1.button("Save Zone", use_container_width=True):
-                st.session_state["custom_hubs"][new_zone_name] = {
-                    "lat": new_lat,
-                    "lng": new_lng,
-                    "radius_m": float(new_radius),
-                    "polygon": new_poly,
-                }
-                st.success(f"Saved custom zone '{new_zone_name}'!")
-                st.rerun()
-
-            if selected_zone_name in st.session_state["custom_hubs"]:
-                if add_c2.button("Delete Selected Zone", use_container_width=True):
-                    del st.session_state["custom_hubs"][selected_zone_name]
-                    st.success(f"Deleted custom zone '{selected_zone_name}'!")
-                    st.rerun()
-
-    # 4. Prepare PyDeck Map Data
-    map_data_list: List[Dict[str, Any]] = []
-    for snode in live_spatial_state.values():
-        if snode.state in selected_states and snode.lat != 0.0 and snode.lng != 0.0:
-            map_data_list.append({
-                "thing_name": snode.thing_name,
-                "lat": snode.lat,
-                "lng": snode.lng,
-                "speed": snode.speed_kmh,
-                "current": snode.bms_current_a,
-                "voltage": snode.bms_voltage_v,
-                "soc": snode.soc_pct,
-                "state": snode.state,
-                "state_badge": f"{snode.state}",
-                "color_rgba": list(snode.color_rgba),
-                "color_hex": snode.color_hex,
-                "last_seen_str": snode.last_seen_str,
-                "radius": 120,
-            })
-
-    df_map_nodes = pd.DataFrame(map_data_list)
-
-    # Determine initial map center
-    if not df_map_nodes.empty:
-        center_lat = float(df_map_nodes["lat"].mean())
-        center_lng = float(df_map_nodes["lng"].mean())
-        zoom_level = 11.0
-    else:
-        center_lat, center_lng, zoom_level = 22.7525975, 88.3912191, 11.0
-
-    layers: List[pdk.Layer] = []
-
-    # --- Add Primary Scatterplot Layer for Fleet Markers ---
-    if not df_map_nodes.empty:
-        scatterplot_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_map_nodes,
-            get_position=["lng", "lat"],
-            get_fill_color="color_rgba",
-            get_line_color=[255, 255, 255, 200],
-            get_radius="radius",
-            radius_min_pixels=7,
-            radius_max_pixels=18,
-            line_width_min_pixels=1.5,
-            pickable=True,
-            auto_highlight=True,
-        )
-        layers.append(scatterplot_layer)
-
-    # --- Route History Playback Layer ---
-    if enable_history and history_device:
-        target_snode = live_spatial_state.get(history_device)
-        t_lat = target_snode.lat if target_snode and target_snode.lat != 0.0 else 18.9553
-        t_lng = target_snode.lng if target_snode and target_snode.lng != 0.0 else 72.8465
-
-        df_route = generate_historical_route_breadcrumbs(history_device, t_lat, t_lng)
-        path_coords = df_route[["lng", "lat"]].values.tolist()
-
-        route_layer = pdk.Layer(
-            "PathLayer",
-            data=[{"path": path_coords, "name": f"Route of {history_device}"}],
-            get_path="path",
-            get_color=[53, 169, 255, 230],
-            width_min_pixels=4,
-            pickable=True,
-        )
-        route_start_end_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_route,
-            get_position=["lng", "lat"],
-            get_fill_color=[53, 169, 255, 180],
-            get_radius=80,
-            radius_min_pixels=4,
-            radius_max_pixels=8,
-            pickable=True,
-        )
-        layers.extend([route_layer, route_start_end_layer])
-
-        # Adjust viewport to route
-        center_lat = float(df_route["lat"].mean())
-        center_lng = float(df_route["lng"].mean())
-        zoom_level = 12.0
-
-        st.caption(
-            f"Route History Loaded: Device **{history_device}** · "
-            f"{len(df_route)} breadcrumb points rendered."
-        )
-
-    # Real-time Breach Detection Engine against Active Monitoring Zone
-    breach_alerts: List[Dict[str, Any]] = []
-    if enable_geofence and selected_zone_name in all_hubs:
-        active_zone = all_hubs[selected_zone_name]
-        z_lat, z_lng = active_zone["lat"], active_zone["lng"]
-        z_radius = active_zone.get("radius_m", 3000.0)
-        z_polygon = active_zone.get("polygon", [])
-
-        for snode in live_spatial_state.values():
-            if snode.lat != 0.0 and snode.lng != 0.0:
-                if z_polygon and len(z_polygon) >= 3:
-                    is_inside = point_in_polygon(snode.lat, snode.lng, z_polygon)
-                else:
-                    dist_m = haversine_distance_m(snode.lat, snode.lng, z_lat, z_lng)
-                    is_inside = dist_m <= z_radius
-
-                if not is_inside:
-                    dist_m = haversine_distance_m(snode.lat, snode.lng, z_lat, z_lng)
-                    breach_alerts.append({
-                        "thing_name": snode.thing_name,
-                        "state": snode.state,
-                        "lat": snode.lat,
-                        "lng": snode.lng,
-                        "dist_km": round(dist_m / 1000.0, 2),
-                    })
-
-    if breach_alerts:
-        st.warning(
-            f"⚠️ GEOFENCE BREACH ALERT: {len(breach_alerts)} vehicle(s) detected OUTSIDE designated zone `{selected_zone_name}`!",
-        )
-        with st.expander("View Breached Vehicles Details"):
-            st.dataframe(
-                pd.DataFrame(breach_alerts),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    # PyDeck Interactive Tooltip (Styled to match dark glassmorphism theme)
-    pydeck_tooltip = {
-        "html": (
-            "<b>Device:</b> {thing_name}<br/>"
-            "<b>State:</b> <span style='color:{color_hex}'><b>{state}</b></span><br/>"
-            "<b>Speed:</b> {speed} km/h<br/>"
-            "<b>SOC:</b> {soc}%<br/>"
-            "<b>Voltage:</b> {voltage} V<br/>"
-            "<b>Current:</b> {current} A<br/>"
-            "<b>Last Seen:</b> {last_seen_str}"
-        ),
-        "style": {
-            "backgroundColor": "#121821",
-            "color": "#e4e9f0",
-            "border": "1px solid #222d3d",
-            "borderRadius": "8px",
-            "fontSize": "12px",
-            "fontFamily": "JetBrains Mono, monospace",
-            "padding": "8px 12px",
-            "boxShadow": "0 4px 16px rgba(0,0,0,0.5)",
-        },
-    }
-
-    # Render Interactive Folium Map with Drawing Plugin if available, else Pydeck canvas
-    if HAS_FOLIUM:
-        gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
-        folium_output = render_folium_fleet_map(
-            live_spatial_state=live_spatial_state,
-            selected_states=selected_states,
-            center_lat=center_lat,
-            center_lng=center_lng,
-            zoom_level=zoom_level,
-            gkey=gkey,
-        )
-        if folium_output:
-            all_drawings = folium_output.get("all_drawings")
-            if all_drawings:
-                st.session_state["captured_geofences"] = all_drawings
-                st.caption(f"Active Interactive Geofence Zones: **{len(all_drawings)} drawn shape(s)** captured in session state.")
-                with st.expander("Inspect Captured GeoJSON Geofence Data"):
-                    st.json(all_drawings)
-    else:
-        # Resolve Multi-Provider Map Style (Pydeck Fallback)
-        tile_spec, is_tile_layer, provider_info = resolve_spatial_map_style()
-        st.caption(f"Spatial Tile Provider: **{provider_info}**")
-
-        if is_tile_layer and tile_spec:
-            basemap_layer = pdk.Layer(
-                "TileLayer",
-                data=tile_spec,
-                max_requests=-1,
-                pickable=False,
-                opacity=1.0,
-            )
-            layers.insert(0, basemap_layer)
-            active_map_style = None
+    with tab_manage:
+        if not custom:
+            st.caption("No drawn zones yet. Presets are built in and cannot be removed.")
         else:
-            active_map_style = tile_spec
+            for name, z in list(custom.items()):
+                c1, c2 = st.columns([3, 1.1], vertical_alignment="center")
+                c1.markdown(
+                    f"**⚡ {name}**<br><span style='color:#8b98ab;font-size:.72rem'>"
+                    f"{zone_summary(z)}</span>", unsafe_allow_html=True)
+                if c2.button("Delete", key=f"delzone_{name}",
+                             use_container_width=True):
+                    custom.pop(name, None)
+                    # Drop the fingerprint too, otherwise the shape still on the
+                    # map would never be re-importable after deletion.
+                    fp = z.get("fingerprint")
+                    if fp:
+                        st.session_state.setdefault(K_SEEN_SHAPES, set()).discard(fp)
+                    if st.session_state.get(K_ACTIVE_ZONE) == name:
+                        st.session_state[K_ACTIVE_ZONE] = next(iter(HUB_PRESETS))
+                    st.rerun()
+            st.caption("Deleting a zone here does not erase the shape from the map; "
+                       "clear it with the map's trash tool if you want it gone visually.")
 
-        # Render PyDeck Canvas
-        view_state = pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lng,
-            zoom=zoom_level,
-            pitch=0,
-            bearing=0,
-        )
+    return zone_name, zone
 
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=layers,
-                initial_view_state=view_state,
-                tooltip=pydeck_tooltip,
-                map_style=active_map_style,
-            ),
-            use_container_width=True,
-        )
 
-    # 5. Device Details Data Grid (Filtered to current spatial view)
-    st.markdown("##### Active Spatial Fleet Summary")
-    if not df_map_nodes.empty:
-        grid_df = df_map_nodes[
-            ["thing_name", "state", "speed", "soc", "voltage", "current", "last_seen_str"]
-        ].rename(
-            columns={
-                "thing_name": "Device ID",
-                "state": "State",
-                "speed": "Speed (km/h)",
-                "soc": "SOC (%)",
-                "voltage": "Voltage (V)",
-                "current": "Current (A)",
-                "last_seen_str": "Last Seen",
-            }
-        )
-        st.dataframe(
-            grid_df,
-            use_container_width=True,
-            hide_index=True,
-            height=240,
-        )
+# ==============================================================================
+# 9. PAGE
+# ==============================================================================
+
+def render_map_console() -> None:
+    header(
+        "Fleet Map Console",
+        "Live spatial tracking, historical route playback and geofence breach "
+        "detection. Addresses are reverse-geocoded; exact coordinates live in the "
+        "map popups.",
+        right="Folium · OSM/Carto" if HAS_FOLIUM else "PyDeck fallback",
+    )
+
+    fleet_info = fl.discover()
+    if fleet_info.error:
+        st.error(f"Fleet discovery failed: {fleet_info.error}", icon="⛔")
+        return
+    if not fleet_info.names:
+        st.info("No nodes registered. Provision a device to enable spatial tracking.",
+                icon="📡")
+        return
+
+    nodes = build_spatial_state(fleet_info)
+    counts: Dict[str, int] = {s: 0 for s in ALL_STATES}
+    for n in nodes.values():
+        counts[n.state] += 1
+
+    # ---------- Block A ----------
+    stat_row([
+        stat("Total Fleet", str(len(nodes)), "registered units", tone="info"),
+        stat("Moving", str(counts["Moving"]), "under power", tone="ok"),
+        stat("Stopped", str(counts["Stopped"]), "parked, no current", tone="bad"),
+        stat("Idle", str(counts["Idle"]), "static, drawing current", tone="warn"),
+        stat("Towing / Theft", str(counts["Towing/Theft"]), "moving, no current",
+             tone="bad" if counts["Towing/Theft"] else "mute"),
+        stat("Offline", str(counts["Offline"]), "no recent telemetry",
+             tone="warn" if counts["Offline"] else "mute"),
+    ])
+    st.divider()
+
+    panel, canvas = st.columns([1, 2.35], gap="large")
+
+    with panel:
+        visible_states, focus = _block_b_filters(fleet_info.names, counts)
+        st.divider()
+        play_on, day_from, day_to = _block_c_playback(focus)
+        st.divider()
+        zone_name, active_zone = _block_d_geofencing()
+
+    target = nodes.get(focus) if focus != "All Fleet Vehicles" else None
+    frame = nodes_to_frame(nodes, visible_states)
+
+    if target and target.has_fix:
+        center, zoom = (target.lat, target.lng), 14
+    elif not frame.empty:
+        center, zoom = (float(frame["lat"].mean()), float(frame["lng"].mean())), 11
     else:
-        st.caption("No devices match the currently selected spatial state filters.")
+        center, zoom = DEFAULT_CENTER, 11
+
+    focus_place = resolve_place(target.lat, target.lng) if target else ""
+
+    route = None
+    if play_on and target and target.has_fix:
+        route = generate_historical_route(target.thing_name, target.lat, target.lng,
+                                          day_from, day_to)
+
+    with canvas:
+        # ---------- focused unit summary: places, not coordinates ----------
+        if target:
+            compact_metrics([
+                ("UNIT", target.thing_name, ""),
+                ("LOCATION", focus_place, ""),
+                ("STATE", f"{STATE_ICON[target.state]} {target.state}",
+                 target.color_hex),
+                ("SPEED", f"{target.speed_kmh:.1f} km/h", ""),
+            ])
+        else:
+            compact_metrics([
+                ("SCOPE", "Entire fleet", ""),
+                ("MAP CENTRE", resolve_place(*center), ""),
+                ("PLOTTED", f"{len(frame)} / {len(nodes)}", ""),
+            ])
+
+        if route is not None and not route.empty:
+            st.caption(f"🛣️ Route playback · **{len(route)} points** · "
+                       f"{day_from:%d %b} → {day_to:%d %b} · *synthetic trail until a "
+                       f"telemetry history store is wired*")
+
+        if HAS_FOLIUM:
+            out = render_folium_map(nodes, visible_states, center, zoom, active_zone,
+                                    zone_name, route, focus_place,
+                                    target.thing_name if target else "")
+            # Auto-import drawn shapes. `all_drawings` (not last_active_drawing)
+            # so shapes drawn while the script was mid-run are not missed.
+            created = sync_drawn_zones((out or {}).get("all_drawings"))
+            if created:
+                st.session_state[K_ACTIVE_ZONE] = created[-1]
+                st.toast(f"Zone saved: {created[-1]}", icon="🛡️")
+                # Fires once per shape: the fingerprint is now recorded, so the
+                # next pass finds nothing new and does not rerun again.
+                st.rerun()
+        else:
+            st.caption("`folium` / `streamlit-folium` not installed — drawing tools "
+                       "unavailable. Install them to add custom zones.")
+            render_pydeck_map(frame, center, zoom, active_zone, route)
+
+    # ---------- breach detection ----------
+    breaches = [
+        {"Device": n.thing_name, "State": n.state,
+         "Distance from centre (km)": round(
+             haversine_distance_m(n.lat, n.lng, active_zone["lat"],
+                                  active_zone["lng"]) / 1000.0, 2)}
+        for n in nodes.values()
+        if n.has_fix and not zone_contains(active_zone, n.lat, n.lng)
+    ]
+    if breaches:
+        st.warning(f"⚠️ **{len(breaches)}** vehicle(s) outside **{zone_name}**.")
+        with st.expander("Breach detail"):
+            st.dataframe(pd.DataFrame(breaches), use_container_width=True,
+                         hide_index=True)
+
+    # ---------- fleet grid ----------
+    st.divider()
+    st.markdown("#### 📋 Fleet Detail")
+    if frame.empty:
+        st.caption("No vehicles match the current state filter.")
+        return
+    st.dataframe(
+        frame[["thing_name", "state", "speed", "soc", "voltage", "current",
+               "lat", "lng", "last_seen_str"]].rename(columns={
+                   "thing_name": "Device", "state": "State", "speed": "Speed (km/h)",
+                   "soc": "SOC (%)", "voltage": "Voltage (V)", "current": "Current (A)",
+                   "lat": "Latitude", "lng": "Longitude", "last_seen_str": "Last Seen"}),
+        use_container_width=True, hide_index=True, height=260,
+    )

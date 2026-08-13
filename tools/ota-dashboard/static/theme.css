@@ -137,6 +137,124 @@ section[data-testid="stSidebar"] hr {
   margin: 0.45rem 0 !important;
 }
 
+/* ---------- sidebar footer anchored to the bottom ----------
+ * Flexbox push, deliberately NOT `position: absolute; bottom: 0`. Absolute
+ * positioning removes the footer from flow, so on a short viewport it overlaps
+ * the navigation instead of being pushed below it, and it also breaks the
+ * sidebar's own scrolling once content exceeds the screen.
+ *
+ * Instead the content column is made a real flex column and a zero-height
+ * marker (.sb-spacer, emitted by sidebar() in app.py) is grown to absorb all
+ * slack. Everything after the marker settles at the bottom, and when content
+ * is taller than the viewport the spacer simply collapses and the sidebar
+ * scrolls normally.
+ *
+ * `min-height: 0` on each flex ancestor is required: flex items default to
+ * min-height:auto, which refuses to shrink below content size and would
+ * suppress scrolling on small screens.
+ */
+section[data-testid="stSidebar"] div[data-testid="stSidebarContent"] {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"] {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"]
+  > div[data-testid="stVerticalBlock"] {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
+
+/* The one element container holding the marker becomes the elastic gap.
+ * Scoped to stElementContainer so the ancestor blocks (which also "have" the
+ * marker as a descendant) are not matched. */
+section[data-testid="stSidebar"] div[data-testid="stElementContainer"]:has(.sb-spacer),
+section[data-testid="stSidebar"] .element-container:has(.sb-spacer) {
+  flex: 1 1 auto !important;
+  min-height: 0.35rem !important;
+}
+.sb-spacer { height: 0; margin: 0; padding: 0; }
+
+/* Footer card: uniform padding, no collapsing margins against the divider. */
+.sb-footer {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.7rem 0.8rem;
+  margin: 0 0 0.5rem 0;
+  font-size: 0.72rem;
+  line-height: 1.75;
+  color: var(--txt-dim);
+}
+.sb-footer .sb-k { letter-spacing: 0.06em; }
+.sb-footer .sb-v { color: var(--txt); }
+.sb-footer .sb-role { color: var(--acc); font-weight: 600; }
+.sb-credit {
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid #1b2532;
+  font-size: 0.71rem;
+}
+/* Keep the footer's own controls tight against the card above them. */
+section[data-testid="stSidebar"]
+  div[data-testid="stElementContainer"]:has(.sb-footer) {
+  flex: 0 0 auto !important;
+}
+
+/* ---------- sidebar footer: single sticky group ----------
+ * The footer (system info + credits + Refresh/Sign out) lives in one
+ * st.container(). It carries a zero-height marker so the container itself can be
+ * selected, since Streamlit gives containers no class of their own.
+ *
+ * `position: sticky` rather than `absolute`: sticky keeps the block IN FLOW, so
+ * it can never overlap the navigation on a short viewport and the sidebar still
+ * scrolls. Combined with the .sb-spacer flex push above, the result is "pinned
+ * to the bottom" on a tall screen and "last item, reachable by scrolling" on a
+ * short one — which is what absolute positioning gets wrong.
+ */
+section[data-testid="stSidebar"]
+  div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .sb-foot) {
+  position: sticky !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  flex: 0 0 auto !important;
+  background: var(--bg);
+  padding-top: 0.35rem;
+  margin-top: auto !important;   /* pushes to the bottom even if .sb-spacer is not matched */
+  z-index: 5;
+}
+.sb-foot { height: 0; margin: 0; padding: 0; }
+
+/* ---------- compact metric strip (Map Console) ----------
+ * Deliberately NOT an override of stMetricValue/stMetricLabel: those testids are
+ * shared with Job Tracking and Live Telemetry, which are out of scope.
+ */
+.cm-row {
+  display: flex; flex-wrap: wrap; gap: 0.4rem;
+  margin: 0 0 0.55rem 0;
+}
+.cm-cell {
+  flex: 1 1 120px; min-width: 0;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.42rem 0.6rem;
+}
+.cm-l {
+  font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.11em;
+  color: var(--txt-dim); line-height: 1.3; text-transform: uppercase;
+}
+.cm-v {
+  font-size: 0.86rem; font-weight: 650; color: var(--txt);
+  line-height: 1.35; margin-top: 0.1rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* ---------- STREAMLIT SIDEBAR RADIO OVERHAUL (DOT-LESS BUTTONS) ---------- */
 section[data-testid="stSidebar"] div[role="radiogroup"] {
   gap: 0.38rem !important;
