@@ -39,7 +39,6 @@ from core.settings import settings
 
 st.set_page_config(
     page_title="AS AI · Fleet OTA Console",
-    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -56,7 +55,7 @@ def fleet_or_stop() -> fl.Fleet:
     as an actionable message instead of a traceback."""
     f = fl.discover()
     if f.error:
-        st.error(f.error, icon="⛔")
+        st.error(f.error)
         st.caption("Fix the credentials in `.streamlit/secrets.toml`, then use "
                    "**Refresh** in the sidebar.")
         st.stop()
@@ -180,11 +179,11 @@ def page_firmware() -> None:
             ])
         with right:
             for e in meta.errors:
-                st.error(e, icon="⛔")
+                st.error(e)
             for w in meta.warnings:
-                st.warning(w, icon="⚠️")
+                st.warning(w)
             if meta.deployable and not meta.warnings:
-                st.success("Image validated. Safe to publish.", icon="✅")
+                st.success("Image validated. Safe to publish.")
 
             version = st.text_input(
                 "Release version", value=meta.version or "",
@@ -198,7 +197,6 @@ def page_firmware() -> None:
                     f"Declared `{version}` ≠ embedded `{meta.version}`. The device "
                     "reports its own FW_VERSION on SUCCEEDED, so this mismatch "
                     "will show up in job status details.",
-                    icon="⚠️",
                 )
 
             key = fw.s3_key(CFG.firmware_prefix, version or "unversioned")
@@ -210,7 +208,6 @@ def page_firmware() -> None:
                     f"Key already exists ({existing['ContentLength']:,} B, "
                     f"{existing['LastModified']:%Y-%m-%d %H:%M} UTC). Publishing "
                     "overwrites it — devices pinned to this URL get the new bytes.",
-                    icon="⚠️",
                 )
 
             can = bool(meta.deployable and version and CFG.bucket and is_operator())
@@ -227,7 +224,7 @@ def page_firmware() -> None:
                     "sha256": meta.sha256, "embedded": meta.version,
                     "etag": res["etag"], "published": time.time(),
                 }
-                st.success(f"Published. ETag `{res['etag']}`", icon="✅")
+                st.success(f"Published. ETag `{res['etag']}`")
                 st.rerun()
 
     # -------------------------------------------------- existing artefact
@@ -254,7 +251,7 @@ def page_firmware() -> None:
                 "sha256": "", "embedded": "", "etag": obj.get("ETag", "").strip('"'),
                 "published": obj["LastModified"].timestamp(),
             }
-            st.success("Staged.", icon="✅")
+            st.success("Staged.")
             st.rerun()
 
 
@@ -280,7 +277,7 @@ def _confirm(job_id: str, targets: tuple[str, ...], art: dict,
     st.code(document, language="json")
     st.warning("These are live battery packs with MOSFET control. A failed flash "
                "leaves the device on its current bank, but a *bad image that "
-               "boots* does not.", icon="⚠️")
+               "boots* does not.")
 
     c1, c2 = st.columns(2)
     if c1.button("Cancel", use_container_width=True):
@@ -308,7 +305,7 @@ def _confirm(job_id: str, targets: tuple[str, ...], art: dict,
         except Exception as exc:  # noqa: BLE001
             # The job is already live; a failed archive must not read as failure.
             st.warning(f"Job created, but archiving the document to "
-                       f"s3://{CFG.bucket}/{CFG.jobs_prefix} failed: {exc}", icon="📄")
+                       f"s3://{CFG.bucket}/{CFG.jobs_prefix} failed: {exc}")
 
         st.session_state["tracked_job"] = res["jobId"]
         st.session_state["just_created"] = res["jobId"]
@@ -325,17 +322,16 @@ def page_deploy() -> None:
     )
 
     if not art:
-        st.info("Publish or stage a firmware artefact in **Firmware Registry** first.",
-                icon="📦")
+        st.info("Publish or stage a firmware artefact in **Firmware Registry** first.")
         return
 
     fleet = fleet_or_stop()
     if fleet.source == "registry":
-        st.caption(f"⚠️ {fleet.note}")
+        st.caption(f" {fleet.note}")
     if not fleet.nodes:
         st.warning("No things found in this account/region. Provision a device "
                    "first (scripts/provision_device.py), or scope "
-                   "`[iot].thing_group` / `thing_type` correctly.", icon="📡")
+                   "`[iot].thing_group` / `thing_type` correctly.")
         return
 
     stat_row([
@@ -447,10 +443,10 @@ def page_deploy() -> None:
             sched_errs = jobs.validate_schedule(start_utc, end_utc)
             if sched_errs:
                 for e in sched_errs:
-                    st.error(e, icon="⛔")
+                    st.error(e)
             else:
                 st.success(f"Rollout begins {start_utc:%Y-%m-%d %H:%M} UTC "
-                           f"({start_utc.astimezone(tz):%H:%M} {tzname}).", icon="🕒")
+                           f"({start_utc.astimezone(tz):%H:%M} {tzname}).")
 
     plan = jobs.RolloutPlan(
         max_per_minute=int(max_per_min),
@@ -495,11 +491,11 @@ def page_deploy() -> None:
                 "raise the URC buffer in firmware."
             )
         for b in blocking:
-            st.error(b, icon="⛔")
+            st.error(b)
         for a in pf.advisory:
-            st.info(a, icon="ℹ️")
+            st.info(a)
         if not blocking:
-            st.success(f"{len(selected)} target(s) cleared pre-flight.", icon="✅")
+            st.success(f"{len(selected)} target(s) cleared pre-flight.")
 
         job_id = jobs.make_job_id(CFG.job_id_prefix, art["version"])
         st.caption(f"Job id → `{job_id}`")
@@ -538,7 +534,7 @@ def _exec_frame(snap: jobs.JobSnapshot) -> pd.DataFrame:
 def page_tracking() -> None:
     created = st.session_state.pop("just_created", None)
     if created:
-        st.toast(f"Job {created} created.", icon="🚀")
+        st.toast(f"Job {created} created.")
 
     recent, err = jobs.recent_jobs(40)
     header(
@@ -549,7 +545,7 @@ def page_tracking() -> None:
     )
 
     if err:
-        st.error(err, icon="⛔")
+        st.error(err)
         return
     if not recent:
         st.info("No IoT jobs found in this account/region.")
@@ -580,7 +576,7 @@ def page_tracking() -> None:
     def pane() -> None:
         snap = jobs.snapshot(job_id)
         if snap.error:
-            st.error(snap.error, icon="⛔")
+            st.error(snap.error)
             return
 
         stat_row([
@@ -663,7 +659,7 @@ def page_telemetry() -> None:
     fleet = fl.discover()
     if fleet.error:
         st.warning(f"Fleet discovery unavailable — {fleet.error} "
-                   "Enter a topic filter manually.", icon="⚠️")
+                   "Enter a topic filter manually.")
         fleet = fl.Fleet((), "unavailable", "")
 
     opts = (("Selected nodes", "Whole fleet", "Custom topic") if fleet.nodes
@@ -692,8 +688,7 @@ def page_telemetry() -> None:
         return
     if len(topics) > 8:
         st.warning(f"{len(topics)} explicit topics. Consider the fleet wildcard "
-                   f"`{CFG.telemetry_topic('+')}` instead of many subscriptions.",
-                   icon="⚠️")
+                   f"`{CFG.telemetry_topic('+')}` instead of many subscriptions.")
 
     if not CFG.endpoint:
         st.error("Set `[iot].endpoint` in secrets.toml (the iot:Data-ATS endpoint).")

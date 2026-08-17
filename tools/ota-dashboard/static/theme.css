@@ -29,6 +29,13 @@ h1, h2, h3 { letter-spacing: -0.02em; }
   background: linear-gradient(135deg, var(--acc), var(--acc-2));
   box-shadow: 0 10px 34px -10px rgba(0, 224, 164, .65);
 }
+/* Wordmark variant: the square is sized for a 2-letter monogram, so a full
+   word needs an auto-width pill or the text overflows the fixed 62px box. */
+.gate-mark.gate-mark-word {
+  width: auto; height: auto; display: inline-grid;
+  padding: .5rem 1.15rem; border-radius: 999px;
+  font: 700 15px/1.15 var(--mono); letter-spacing: .06em;
+}
 /* Heading selectors are deliberately over-specified: Streamlit styles
    headings inside stMarkdownContainer, which ties or beats a bare class. */
 .gate-wrap h1.gate-title { font-size: 1.72rem; margin: 0; font-weight: 650;
@@ -182,13 +189,21 @@ section[data-testid="stSidebar"] .element-container:has(.sb-spacer) {
 }
 .sb-spacer { height: 0; margin: 0; padding: 0; }
 
-/* Footer card: uniform padding, no collapsing margins against the divider. */
+/* Footer info block.
+ *
+ * Deliberately has NO background, border or radius. Those produced the dark
+ * square that clashed with the sidebar surface — a panel-coloured card sitting
+ * on a differently-coloured sidebar reads as a misaligned artifact rather than
+ * a grouped block. Separation now comes from the divider above it and the
+ * inset border under the credits, which need no fill.
+ */
 .sb-footer {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 0.7rem 0.8rem;
-  margin: 0 0 0.5rem 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0.15rem 0.1rem;
+  margin: 0 0 0.45rem 0;
   font-size: 0.72rem;
   line-height: 1.75;
   color: var(--txt-dim);
@@ -225,7 +240,11 @@ section[data-testid="stSidebar"]
   bottom: 0 !important;
   width: 100% !important;
   flex: 0 0 auto !important;
-  background: var(--bg);
+  /* Inherit the sidebar's own surface. A hardcoded --bg is the app BODY colour,
+     which differs from the sidebar and produced a visible block edge. The
+     fallback keeps it transparent on themes that do not expose the variable —
+     content can then scroll under it, which is the lesser artifact. */
+  background: var(--secondary-background-color, transparent);
   padding-top: 0.35rem;
   margin-top: auto !important;   /* pushes to the bottom even if .sb-spacer is not matched */
   z-index: 5;
@@ -253,6 +272,31 @@ section[data-testid="stSidebar"]
   font-size: 0.86rem; font-weight: 650; color: var(--txt);
   line-height: 1.35; margin-top: 0.1rem;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------- geofence Manage rows ----------
+ * Name and the ⋮ menu sit on one baseline. min-width:0 is required on the text
+ * column: a flex/grid child defaults to min-width:auto and refuses to shrink
+ * below its content, so a long zone name would push the menu button out of the
+ * row instead of ellipsing.
+ */
+.zn-row {
+  display: flex; flex-direction: column; justify-content: center;
+  min-width: 0; min-height: 2.4rem; padding: .1rem 0;
+}
+.zn-name {
+  color: var(--txt); font-weight: 600; font-size: .82rem; line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.zn-meta {
+  color: var(--txt-dim); font-size: .68rem; line-height: 1.3; margin-top: .1rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Square-ish ⋮ trigger so it reads as an icon button, not a wide CTA. */
+section[data-testid="stSidebar"] div[data-testid="stPopover"] button,
+div[data-testid="stPopover"] button {
+  min-height: 2.1rem; padding: .2rem .4rem !important;
+  font-size: 1.05rem; line-height: 1; letter-spacing: 0;
 }
 
 /* ---------- STREAMLIT SIDEBAR RADIO OVERHAUL (DOT-LESS BUTTONS) ---------- */

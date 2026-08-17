@@ -58,7 +58,7 @@ def require_login() -> Role:
     st.markdown(
         """
         <div class="gate-wrap">
-          <div class="gate-mark">AS</div>
+          <div class="gate-mark gate-mark-word">Pointo R&amp;D</div>
           <h1 class="gate-title">Fleet OTA &amp; Diagnostics</h1>
           <!-- h1/p classes are targeted by over-specified CSS rules; see theme.css -->
           <p class="gate-sub">ESP32 &middot; EC200U-CN &middot; AWS IoT Core &middot; ap-south-1</p>
@@ -67,28 +67,35 @@ def require_login() -> Role:
         unsafe_allow_html=True,
     )
 
-    if not (cfg.operator_password or cfg.viewer_password):
-        st.error("No passwords configured — cannot authenticate.", icon="⛔")
-        st.info(secrets_health(), icon="🔎")
-        st.stop()
+    # The form is centred in the middle third. A full-width password box on a
+    # `layout="wide"` page reads as a data-entry grid, not a credential prompt.
+    _, mid, _ = st.columns([1, 2, 1])
 
-    if attempts >= cfg.max_attempts:
-        st.error("Locked out. Restart the browser session to retry.")
-        st.stop()
+    with mid:
+        if not (cfg.operator_password or cfg.viewer_password):
+            st.error("No passwords configured — cannot authenticate.")
+            st.info(secrets_health())
+            st.stop()
 
-    with st.form("gate", border=True):
-        pwd = st.text_input("Access key", type="password", label_visibility="collapsed",
-                            placeholder="Operator or viewer password")
-        ok = st.form_submit_button("Authenticate", use_container_width=True, type="primary")
+        if attempts >= cfg.max_attempts:
+            st.error("Locked out. Restart the browser session to retry.")
+            st.stop()
 
-    if ok:
-        matched = _match(pwd)
-        if matched:
-            st.session_state[_KEY] = matched
-            st.session_state["auth_attempts"] = 0
-            st.rerun()
-        st.session_state["auth_attempts"] = attempts + 1
-        st.error(f"Rejected. {cfg.max_attempts - attempts - 1} attempt(s) left.")
+        with st.form("gate", border=True):
+            pwd = st.text_input("Access key", type="password",
+                                label_visibility="collapsed",
+                                placeholder="Operator or viewer password")
+            ok = st.form_submit_button("Authenticate", use_container_width=True,
+                                       type="primary")
+
+        if ok:
+            matched = _match(pwd)
+            if matched:
+                st.session_state[_KEY] = matched
+                st.session_state["auth_attempts"] = 0
+                st.rerun()
+            st.session_state["auth_attempts"] = attempts + 1
+            st.error(f"Rejected. {cfg.max_attempts - attempts - 1} attempt(s) left.")
 
     st.stop()
 

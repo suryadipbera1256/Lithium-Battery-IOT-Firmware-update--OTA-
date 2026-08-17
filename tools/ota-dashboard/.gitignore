@@ -1,12 +1,23 @@
-# --- Python env isolation (dashboard-local venv, never commit) ---
-.venv/
-venv/
-__pycache__/
-*.py[cod]
+# ==========================================================
+# Dashboard-local ignores — SECRETS ONLY.
+#
+# The repository root .gitignore is the single source of truth and already
+# covers venvs, __pycache__, build output, IAM renders and OS noise. Those rules
+# are NOT repeated here: two files carrying the same patterns drift, and a rule
+# that quietly stopped matching is how generated IAM policies with a live
+# account ID got committed once already.
+#
+# What remains is deliberate redundancy for the one category where a miss is
+# unrecoverable, and it keeps this folder safe if it is ever extracted into a
+# repository of its own.
+# ==========================================================
 
-# --- Secrets (CRITICAL: contains AWS keys + operator passwords) ---
+# Real values. The .example template must still ship.
 .streamlit/secrets.toml
+secrets.toml
+.env
+.env.*
+!.env.example
 
-# --- Local artifacts ---
-*.bin
-.cache/
+# Rendered IAM policies — generated, and they embed a concrete AWS account ID.
+iam/out/

@@ -24,8 +24,10 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import quote
 
 import pandas as pd
 import pydeck as pdk
@@ -65,11 +67,6 @@ STATE_COLORS: Dict[FleetState, Tuple[Tuple[int, int, int, int], str]] = {
 }
 ALL_STATES: List[FleetState] = list(STATE_COLORS)
 
-STATE_ICON = {
-    "Moving": "🟢", "Stopped": "🔴", "Idle": "🟡",
-    "Towing/Theft": "🟣", "Offline": "⚪",
-}
-
 HUB_PRESETS: Dict[str, Dict[str, Any]] = {
     "Kolkata R&D Hub":    {"lat": 22.7525975, "lng": 88.3912191, "radius_m": 3000.0,
                            "polygon": [[88.3712, 22.7726], [88.4112, 22.7726],
@@ -88,10 +85,33 @@ HUB_PRESETS: Dict[str, Dict[str, Any]] = {
 DEFAULT_CENTER = (22.7525975, 88.3912191)
 STALE_AFTER_S = 120.0
 
+# Viewport clamp: [[S, W], [N, E]] around the Indian subcontinent. Panning is
+# bounded to this box and zoom-out is floored, so the browser never requests the
+# global tile pyramid — that request set is what dominates first-paint bandwidth
+# and tile-cache RAM.
+INDIA_BOUNDS = [[6.5546079, 68.1113787], [35.6745457, 97.395561]]
+MIN_ZOOM = 5      # z4 and below is whole-hemisphere tiles nobody here needs
+MAX_ZOOM = 18
+
 # session_state keys, declared once so nothing drifts
 K_CUSTOM_HUBS = "custom_hubs"        # name -> zone dict (drawn zones)
 K_SEEN_SHAPES = "map_seen_shapes"    # fingerprints already turned into zones
 K_ACTIVE_ZONE = "map_active_zone"    # selectbox value, so a new zone can preselect
+K_ZONE_CENTRED = "map_zone_centred"   # last zone the map flew to (edge trigger)
+K_VIEW = "map_view"                   # sticky (lat, lng, zoom) the camera holds
+K_LAST_FOCUS = "map_last_focus"       # target unit, to detect a change
+K_DRAW_REPORTED = "map_draw_reported"  # component has returned all_drawings once
+
+# One definition for every geofence outline, so preset and custom zones cannot
+# drift apart. `opacity` (the STROKE alpha) is set explicitly: leaving it to
+# Leaflet's default meant overlapping zones compounded their fills and edges
+# until the stack rendered near-black.
+ZONE_STYLE: Dict[str, Dict[str, Any]] = {
+    "active":   {"color": "#3388ff", "weight": 2.5, "opacity": 0.95,
+                 "fill_color": "#3388ff", "fill_opacity": 0.20},
+    "inactive": {"color": "#8b98ab", "weight": 1.5, "opacity": 0.50,
+                 "fill_color": "#8b98ab", "fill_opacity": 0.05},
+}
 
 
 @dataclass(slots=True)
@@ -291,17 +311,21 @@ def generate_synthetic_spatial_fleet(node_names: Tuple[str, ...]) -> Dict[str, D
 @st.cache_data(ttl=3600, show_spinner=False)
 def generate_historical_route(
     thing_name: str, start_lat: float, start_lng: float,
-    day_from: date, day_to: date, num_points: int = 48,
+    ts_from: datetime, ts_to: datetime, num_points: int = 48,
 ) -> pd.DataFrame:
     """Breadcrumb trail spanning the requested window.
 
     Synthetic. Swap the body for a Timestream/S3 query when history is stored;
     the return shape (lat, lng, speed_kmh, soc_pct, timestamp) is the contract
     the renderer depends on.
+
+    num_points is a FIXED sample budget, not a function of the window: the real
+    query behind this must down-sample server-side, or a 24 h window on 30 s
+    telemetry returns 2 880 rows per device and the cost scales with the slider.
     """
-    rng = random.Random(_stable_seed(f"{thing_name}{day_from}{day_to}"))
-    span_s = max((day_to - day_from).days + 1, 1) * 86_400
-    t0 = datetime.combine(day_from, datetime.min.time(), tzinfo=timezone.utc).timestamp()
+    rng = random.Random(_stable_seed(f"{thing_name}{ts_from}{ts_to}"))
+    span_s = max((ts_to - ts_from).total_seconds(), 60.0)
+    t0 = ts_from.timestamp()
     step = span_s / max(num_points - 1, 1)
 
     rows: List[Dict[str, Any]] = []
@@ -340,8 +364,15 @@ def geojson_to_zone(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
         if gtype == "Point" and coords:
             lng, lat = float(coords[0]), float(coords[1])
-            radius = float(props.get("radius") or 1000.0)
-            return {"lat": lat, "lng": lng, "radius_m": radius, "polygon": []}
+            has_r = props.get("radius") is not None
+            # `radius_explicit` matters on the round trip: L.Circle.toGeoJSON()
+            # emits a bare Point and DROPS the radius, so a saved circle coming
+            # back from the map would otherwise be rewritten to the 1000 m
+            # default. sync_drawn_zones() keeps the stored radius when this is
+            # False.
+            return {"lat": lat, "lng": lng,
+                    "radius_m": float(props["radius"]) if has_r else 1000.0,
+                    "polygon": [], "radius_explicit": has_r}
 
         if gtype == "Polygon" and coords:
             ring = [[float(p[0]), float(p[1])] for p in coords[0]]
@@ -352,7 +383,8 @@ def geojson_to_zone(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     ring = ring[:-1]
                 lat_c = sum(p[1] for p in ring) / len(ring)
                 lng_c = sum(p[0] for p in ring) / len(ring)
-                return {"lat": lat_c, "lng": lng_c, "radius_m": 0.0, "polygon": ring}
+                return {"lat": lat_c, "lng": lng_c, "radius_m": 0.0,
+                        "polygon": ring, "radius_explicit": True}
     except (TypeError, ValueError, IndexError, KeyError):
         pass
     return None
@@ -383,25 +415,59 @@ def shape_fingerprint(feature: Dict[str, Any]) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
 
-def sync_drawn_zones(drawings: Optional[List[Dict[str, Any]]]) -> List[str]:
-    """Import newly drawn shapes into `custom_hubs`. Returns the names created.
+EDIT_MATCH_M = 400.0     # centroid drift still counted as "the same zone edited"
 
-    Idempotent by fingerprint, which is what keeps this free of rerun loops: the
-    first pass creates the zone and records the fingerprint, every later pass
-    sees a known fingerprint and does nothing, so the caller's `st.rerun()` fires
-    exactly once per drawn shape.
 
-    Additions only. A shape removed with the map's trash tool leaves its saved
-    zone intact — deletion is an explicit action in the Manage tab, so a stray
-    click on the map cannot silently drop a monitoring zone.
+def _match_existing_zone(custom: Dict[str, Dict[str, Any]],
+                         zone: Dict[str, Any]) -> Optional[str]:
+    """Name of the saved zone this geometry is an edited version of, else None.
+
+    Saved zones are re-rendered into the editable FeatureGroup every run, so they
+    come back in `all_drawings` with a FRESH fingerprint whenever the operator
+    nudges them. Fingerprint identity alone would therefore read every edit as a
+    brand-new zone. Centroid proximity is what ties the edited geometry back to
+    the zone it came from.
+
+    O(n) over custom zones, which is a handful — the loop is not the cost here.
     """
-    if not drawings:
+    best, best_d = None, EDIT_MATCH_M
+    for name, z in custom.items():
+        d = haversine_distance_m(zone["lat"], zone["lng"], z["lat"], z["lng"])
+        if d < best_d:
+            best, best_d = name, d
+    return best
+
+
+def sync_drawn_zones(drawings: Optional[List[Dict[str, Any]]]) -> List[str]:
+    """Reconcile map shapes into `custom_hubs`. Returns names created or updated.
+
+    Idempotent by fingerprint, which is what keeps this free of rerun loops: a
+    known fingerprint is skipped, so the caller's `st.rerun()` fires exactly once
+    per real change and the next pass finds nothing to do.
+
+    Saved zones are rendered INTO the editable FeatureGroup, so `all_drawings` is
+    a complete snapshot of what is on the map — which makes deletion a set-diff
+    rather than an event. streamlit-folium exposes no `deleted_features` /
+    `edited_features` channel (verified against its source); `all_drawings` is
+    the only drawing state it returns.
+
+    `drawings is None` means the component has not reported yet and is ignored.
+    An empty LIST is honoured only after at least one real report, so a
+    first-paint blank cannot wipe live monitoring zones.
+    """
+    if drawings is None:
         return []
+    st.session_state[K_DRAW_REPORTED] = True
 
     custom: Dict[str, Dict[str, Any]] = st.session_state.setdefault(K_CUSTOM_HUBS, {})
     seen: set = st.session_state.setdefault(K_SEEN_SHAPES, set())
-    created: List[str] = []
+    touched: List[str] = []
 
+    # PHASE 1 — adds and edits. This MUST run before removals: an edit changes
+    # the geometry and therefore the fingerprint, so a removal pass running first
+    # would see the old fingerprint missing, delete the zone, and let phase 1
+    # re-create it under a fresh default name — silently discarding any rename
+    # and resetting the active-zone selection on every boundary tweak.
     for feature in drawings:
         fp = shape_fingerprint(feature)
         if fp in seen:
@@ -410,46 +476,238 @@ def sync_drawn_zones(drawings: Optional[List[Dict[str, Any]]]) -> List[str]:
         seen.add(fp)                       # mark even on failure: never retry a bad shape
         if not zone:
             continue
+
+        match = _match_existing_zone(custom, zone)
+        if match:
+            prior = custom[match]
+            # L.Circle.toGeoJSON() drops the radius, so a re-rendered circle
+            # returns without one. Keep the stored value rather than silently
+            # resizing the zone to the 1000 m default.
+            if not zone.pop("radius_explicit", False) and not zone["polygon"]:
+                zone["radius_m"] = prior.get("radius_m", zone["radius_m"])
+            zone["fingerprint"] = fp
+            custom[match] = zone
+            touched.append(match)
+            continue
+
+        # A Point with NO properties.radius cannot be a user-drawn circle —
+        # leaflet-draw always attaches the radius to circles it creates. Reaching
+        # here means it is a marker artefact (a popup anchor, a geocoder pin),
+        # and creating a zone from it is the ghost-circle failure. Matched
+        # radius-less Points are fine: that is a saved circle round-tripping
+        # through L.Circle.toGeoJSON(), which drops the radius.
+        if not zone.pop("radius_explicit", False) and not zone["polygon"]:
+            continue
+
         n = len(custom) + 1
-        while f"Custom Zone {n}" in custom:
+        while f"Zone {n} (Custom)" in custom:
             n += 1
-        name = f"Custom Zone {n}"
+        name = f"Zone {n} (Custom)"
         zone["fingerprint"] = fp
         custom[name] = zone
-        created.append(name)
+        touched.append(name)
 
-    return created
+    # PHASE 2 — removals, against fingerprints as they stand AFTER phase 1, so a
+    # zone that was merely edited is no longer a candidate for deletion.
+    live_fps = {shape_fingerprint(f) for f in drawings}
+    for name in [n for n, z in custom.items()
+                 if z.get("fingerprint") and z["fingerprint"] not in live_fps]:
+        custom.pop(name, None)
+        if st.session_state.get(K_ACTIVE_ZONE) == name:
+            st.session_state[K_ACTIVE_ZONE] = next(iter(HUB_PRESETS))
+        touched.append(name)
+
+    return touched
 
 
 # ==============================================================================
 # 6. MAP RENDERERS
 # ==============================================================================
 
+# ---------------------------------------------------------------- marker art
+# One SVG, recoloured per state. An inline DivIcon is used rather than a CDN
+# PNG because the marker must take the state colour at render time (a raster
+# cannot), it needs no network fetch that a locked-down network could block,
+# and it stays crisp at every zoom level.
+_VEHICLE_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" '
+    'width="{size}" height="{size}">'
+    '<g filter="url(#s)">'
+    '<path d="M16 31C16 31 27 21.8 27 13.6A11 11 0 1 0 5 13.6C5 21.8 16 31 16 31Z" '
+    'fill="{fill}" stroke="#ffffff" stroke-width="{stroke}"/>'
+    # battery body + terminal + bolt: reads as "battery asset" at 28-34 px
+    '<rect x="9.5" y="9" width="11" height="9" rx="1.6" fill="#0d1420" opacity=".92"/>'
+    '<rect x="20.6" y="11.4" width="1.9" height="4.2" rx=".8" fill="#0d1420" opacity=".92"/>'
+    '<path d="M15.6 10.2 12.4 14.4h2.5l-1.1 3.4 3.4-4.4h-2.5z" fill="{fill}"/>'
+    '</g>'
+    '<defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%">'
+    '<feDropShadow dx="0" dy="1.2" stdDeviation="1.1" flood-opacity=".45"/>'
+    '</filter></defs></svg>'
+)
+
+# Popup chrome. Injected ONCE into the map header instead of inlined on every
+# marker: Leaflet's own .leaflet-popup-content-wrapper is opaque white with its
+# own radius, so inline styles alone cannot stop the popup looking washed out —
+# the wrapper and the tip have to be overridden. Doing it here also drops ~600 B
+# of duplicated inline CSS per marker from the payload.
+_POPUP_CSS = """
+<style>
+.leaflet-popup-content-wrapper{
+  background:#0d1420 !important; color:#f2f5f9 !important;
+  border:1px solid #24324a !important; border-radius:10px !important;
+  box-shadow:0 14px 38px rgba(0,0,0,.6) !important; opacity:1 !important;
+}
+.leaflet-popup-content{ margin:0 !important; padding:0 !important; width:auto !important; }
+.leaflet-popup-tip{ background:#0d1420 !important; border:1px solid #24324a !important;
+                    box-shadow:none !important; }
+.leaflet-popup-close-button{ color:#8b98ab !important; font-size:17px !important;
+                             padding:6px 8px 0 0 !important; }
+.leaflet-popup-close-button:hover{ color:#f2f5f9 !important; }
+.vp{ font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+     padding:.65rem .8rem .7rem; min-width:236px; }
+.vp-h{ font-size:13px; font-weight:700; color:#4fb3ff; letter-spacing:.02em;
+       padding-bottom:.4rem; margin-bottom:.45rem; border-bottom:1px solid #24324a; }
+.vp table{ border-collapse:collapse; width:100%; }
+.vp td{ padding:2.5px 0; vertical-align:baseline; }
+/* Keys recede, values dominate: 600-weight pure-white values at full opacity
+   are what makes the block legible over a bright basemap. */
+.vp-k{ color:#93a2b8; font-weight:400; font-size:10.5px; letter-spacing:.07em;
+       text-transform:uppercase; padding-right:14px !important; white-space:nowrap; }
+.vp-v{ color:#ffffff; font-weight:600; font-size:12px; opacity:1; text-align:right;
+       font-variant-numeric:tabular-nums; }
+.vp-v.acc{ color:#00e0a4; } .vp-v.warn{ color:#ffb340; } .vp-v.crit{ color:#ff5d6c; }
+.vp-v.dim{ color:#c8d2e0; font-weight:500; }
+</style>
+"""
+
+
+def zone_anchor(zone: Dict[str, Any]) -> List[float]:
+    """Where a zone's popup should hang: its NORTH edge, not its centre.
+
+    Anchoring at the centre parks the popup on top of exactly the vehicles the
+    zone contains — the markers the operator opened it to look at. One degree of
+    latitude is ~111.32 km everywhere (no cos(lat) term, unlike longitude), so
+    the circle case is a straight metres->degrees conversion.
+    """
+    poly = zone.get("polygon") or []
+    if len(poly) >= 3:
+        top = max(poly, key=lambda p: p[1])          # northernmost vertex
+        return [top[1], top[0]]
+    lat_off = zone.get("radius_m", 0.0) / 111_320.0
+    return [zone.get("lat", 0.0) + lat_off, zone.get("lng", 0.0)]
+
+
+@lru_cache(maxsize=64)
+def _zone_popup(name: str, summary: str) -> str:
+    """Click-popup for a geofence boundary.
+
+    Cached: a zone's chrome is a pure function of (name, summary) and both change
+    only when the operator edits the zone, so this is built once per zone for the
+    life of the process rather than on every telemetry-driven rerun.
+    """
+    return (
+        f'<div class="vp"><div class="vp-h">{name}</div><table>'
+        f'<tr><td class="vp-k">Type</td><td class="vp-v">{summary}</td></tr>'
+        f'<tr><td class="vp-k">Status</td>'
+        f'<td class="vp-v acc">Active monitoring zone</td></tr>'
+        f"</table></div>"
+    )
+
+
+@lru_cache(maxsize=16)
+def _pin_data_uri(color_hex: str) -> str:
+    """Same pin as a data URI for deck.gl's IconLayer.
+
+    Cached: there are only ever five state colours, and re-encoding the SVG per
+    row per rerun is pure waste.
+    """
+    svg = _VEHICLE_SVG.format(size=64, fill=color_hex, stroke=1.6)
+    return "data:image/svg+xml;charset=utf-8," + quote(svg, safe="")
+
+
+def _marker_icon(color_hex: str, focused: bool):
+    """DivIcon carrying the recoloured pin. Anchored at the tip, not the centre."""
+    size = 36 if focused else 28
+    svg = _VEHICLE_SVG.format(size=size, fill=color_hex,
+                              stroke=2.0 if focused else 1.5)
+    return folium.DivIcon(
+        html=f'<div style="width:{size}px;height:{size}px">{svg}</div>',
+        icon_size=(size, size),
+        icon_anchor=(size // 2, size),          # tip touches the coordinate
+        class_name="veh-pin",
+    )
+
+
+def _soc_class(soc: float) -> str:
+    return "crit" if soc < 15 else "warn" if soc < 30 else "acc"
+
+
 def _marker_popup(node: SpatialTelemetryNode, place: str) -> str:
-    """All precise technical data lives here, not in the control panel."""
+    """The single source of detail for a vehicle. No hover tooltip competes.
+
+    Emits class names only — every style lives in _POPUP_CSS.
+    """
     rows = [
-        ("State", f"<span style='color:{node.color_hex};font-weight:700'>"
-                  f"{STATE_ICON[node.state]} {node.state}</span>"),
-        ("Location", place or "—"),
-        ("Latitude", f"{node.lat:.7f}"),
-        ("Longitude", f"{node.lng:.7f}"),
-        ("Speed", f"{node.speed_kmh:.1f} km/h"),
-        ("SOC", f"{node.soc_pct:.1f} %"),
-        ("Voltage", f"{node.bms_voltage_v:.2f} V"),
-        ("Current", f"{node.bms_current_a:.2f} A"),
-        ("Last seen", node.last_seen_str),
+        ("State", node.state, ""),
+        ("Location", place or "—", "dim"),
+        ("SOC", f"{node.soc_pct:.1f} %", _soc_class(node.soc_pct)),
+        ("Voltage", f"{node.bms_voltage_v:.2f} V", ""),
+        ("Current", f"{node.bms_current_a:.2f} A",
+         "warn" if node.bms_current_a < 0 else ""),
+        ("Speed", f"{node.speed_kmh:.1f} km/h", ""),
+        ("Latitude", f"{node.lat:.7f}", "dim"),
+        ("Longitude", f"{node.lng:.7f}", "dim"),
+        ("Last seen", node.last_seen_str, "dim"),
     ]
     body = "".join(
-        f"<tr><td style='color:#8b98ab;padding:2px 10px 2px 0;white-space:nowrap'>{k}</td>"
-        f"<td style='color:#e4e9f0;font-weight:600'>{v}</td></tr>"
-        for k, v in rows
+        f'<tr><td class="vp-k">{k}</td>'
+        f'<td class="vp-v {cls}"'
+        + (f' style="color:{node.color_hex}"' if k == "State" else "")
+        + f">{v}</td></tr>"
+        for k, v, cls in rows
     )
-    return (
-        "<div style=\"font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;"
-        "min-width:230px\">"
-        f"<div style='font-size:13px;font-weight:700;color:#35a9ff;margin-bottom:6px'>"
-        f"{node.thing_name}</div><table style='border-collapse:collapse'>{body}</table></div>"
-    )
+    return (f'<div class="vp"><div class="vp-h">{node.thing_name}</div>'
+            f"<table>{body}</table></div>")
+
+
+def _draw_zone(shape_parent, name: str, zone: Dict[str, Any], active: bool,
+               anchor_parent=None) -> None:
+    """Render one geofence. Single definition for presets and custom zones.
+
+    TWO PARENTS, deliberately. `shape_parent` is the editable FeatureGroup that
+    Draw's edit/trash toolbar owns; `anchor_parent` is the bare map.
+
+    The popup hangs off an invisible marker at the zone's north edge so it never
+    covers the vehicles inside. That marker must NOT live in the editable group:
+    everything in that group is serialised back through `all_drawings`, a Marker
+    serialises as a Point, and geojson_to_zone() turns any Point into a circle
+    with the 1000 m default radius. The anchor therefore reappeared as a phantom
+    zone on the next rerun — the "ghost circle after delete". It also sits a full
+    radius north of the centroid, so it never matched EDIT_MATCH_M and was always
+    imported as new rather than recognised.
+
+    popup= only, never tooltip=: a zone covers a large slice of the viewport, so
+    a hover binding fired constantly while the operator aimed at a vehicle.
+    """
+    style = ZONE_STYLE["active" if active else "inactive"]
+    poly = zone.get("polygon") or []
+
+    if len(poly) >= 3:
+        shape = folium.Polygon(locations=[[p[1], p[0]] for p in poly],
+                               fill=True, **style)
+    elif zone.get("radius_m"):
+        shape = folium.Circle(location=[zone["lat"], zone["lng"]],
+                              radius=zone["radius_m"], fill=True, **style)
+    else:
+        return
+    shape.add_to(shape_parent)
+
+    folium.Marker(
+        location=zone_anchor(zone),
+        icon=folium.DivIcon(html="<div style='width:1px;height:1px'></div>",
+                            icon_size=(1, 1)),
+        popup=folium.Popup(_zone_popup(name, zone_summary(zone)), max_width=210),
+    ).add_to(anchor_parent if anchor_parent is not None else shape_parent)
 
 
 def render_folium_map(
@@ -464,39 +722,62 @@ def render_folium_map(
     focus_name: str,
 ) -> Dict[str, Any]:
     """Interactive basemap with draw tools, zone overlay and route playback."""
-    fmap = folium.Map(location=list(center), zoom_start=int(zoom),
-                      tiles="cartodbpositron", control_scale=True)
+    # Positron carries deep street geometry inside India and thins out to
+    # country/major-city labels elsewhere, which is exactly the requested
+    # detail gradient without paying for a bespoke style.
+    fmap = folium.Map(
+        location=list(center), zoom_start=int(zoom),
+        tiles="cartodbpositron", control_scale=True,
+        min_zoom=MIN_ZOOM, max_zoom=MAX_ZOOM,
+        max_bounds=True,
+    )
+    # Explicit viewport clamp. folium's `max_bounds=True` only derives bounds
+    # from the features already added, so the box is set on the Leaflet options
+    # directly. Viscosity 1.0 makes the edge hard — at <1.0 the user can drag
+    # past it and it springs back, which reads as a broken map.
+    fmap.options["maxBounds"] = INDIA_BOUNDS
+    fmap.options["maxBoundsViscosity"] = 1.0
+    # Popup chrome, injected once for the whole map.
+    fmap.get_root().header.add_child(folium.Element(_POPUP_CSS))
 
     gkey = _google_maps_key()
     if gkey:
         folium.TileLayer(
             tiles=f"https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&key={gkey}",
             attr="Google Maps", name="Google Roadmap", overlay=False, control=True,
+            min_zoom=MIN_ZOOM, max_zoom=MAX_ZOOM,
         ).add_to(fmap)
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(fmap)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap",
+                     min_zoom=MIN_ZOOM, max_zoom=MAX_ZOOM).add_to(fmap)
 
-    if active_zone:
-        poly = active_zone.get("polygon") or []
-        if len(poly) >= 3:
-            folium.Polygon(
-                locations=[[p[1], p[0]] for p in poly],
-                color="#35a9ff", fill=True, fill_color="#35a9ff",
-                fill_opacity=0.18, weight=2.5,
-                tooltip=f"Zone: {active_zone_name} ({zone_summary(active_zone)})",
-            ).add_to(fmap)
-        elif active_zone.get("radius_m"):
-            folium.Circle(
-                location=[active_zone["lat"], active_zone["lng"]],
-                radius=active_zone["radius_m"],
-                color="#35a9ff", fill=True, fill_color="#35a9ff",
-                fill_opacity=0.15, weight=2.5,
-                tooltip=f"Zone: {active_zone_name} ({zone_summary(active_zone)})",
-            ).add_to(fmap)
+    # EDITABLE LAYER. Draw's edit/trash toolbar only ever operates on the
+    # FeatureGroup handed to `options.edit.featureGroup`. Without passing one,
+    # folium builds a fresh empty group, so shapes added straight to the map are
+    # invisible to the toolbar — that is why edit/trash appeared to do nothing on
+    # saved zones. Everything editable goes in here.
+    editable = folium.FeatureGroup(name="Custom zones", control=False)
+
+    custom_zones: Dict[str, Dict[str, Any]] = st.session_state.get(K_CUSTOM_HUBS, {})
+    for zname, z in custom_zones.items():
+        # Shape into the editable group (so edit/trash can grab it); popup anchor
+        # onto the map, where Draw cannot serialise it back as a phantom shape.
+        _draw_zone(editable, zname, z, active=(zname == active_zone_name),
+                   anchor_parent=fmap)
+    editable.add_to(fmap)
+
+    # Presets stay OUTSIDE the editable group: they are code-defined, so exposing
+    # them to the trash tool would offer a delete that cannot persist.
+    if active_zone and active_zone_name not in custom_zones:
+        _draw_zone(fmap, active_zone_name, active_zone, active=True)
 
     if route is not None and not route.empty:
+        # No tooltip: the line spans the whole viewport, so hovering anywhere
+        # near it fired constantly, and it only repeated the unit name already
+        # shown in the caption above the map. The breadcrumb dots below keep
+        # theirs — they are small, precise, and carry per-point data nothing
+        # else shows.
         folium.PolyLine(route[["lat", "lng"]].values.tolist(),
-                        color="#ffb340", weight=4, opacity=0.9,
-                        tooltip=f"Route · {focus_name}").add_to(fmap)
+                        color="#ffb340", weight=4, opacity=0.9).add_to(fmap)
         for _, r in route.iloc[::6].iterrows():
             folium.CircleMarker(
                 location=[r["lat"], r["lng"]], radius=3.5,
@@ -510,29 +791,41 @@ def render_folium_map(
         # Geocode only the focused unit: every marker would mean N Nominatim
         # calls per rerun, far past its 1 req/s policy.
         place = focus_place if node.thing_name == focus_name else ""
-        folium.CircleMarker(
+        # NO tooltip= on purpose. A hover tooltip and a click popup on the same
+        # marker fight each other: the tooltip covers the pin the user is aiming
+        # at and repeats what the popup already says. The popup is the single
+        # source of detail.
+        folium.Marker(
             location=[node.lat, node.lng],
-            radius=9 if node.thing_name == focus_name else 7,
-            color="#ffffff", weight=2.0 if node.thing_name == focus_name else 1.2,
-            fill=True, fill_color=node.color_hex, fill_opacity=0.92,
-            popup=folium.Popup(_marker_popup(node, place), max_width=300),
-            tooltip=f"{STATE_ICON[node.state]} {node.thing_name} · {node.state}",
+            icon=_marker_icon(node.color_hex, node.thing_name == focus_name),
+            popup=folium.Popup(_marker_popup(node, place), max_width=320),
         ).add_to(fmap)
 
     Draw(
         export=False, position="topleft",
+        feature_group=editable,        # <- binds edit/trash to the saved zones
+        # folium defaults this to True, which attaches `alert(coords)` to every
+        # drawn layer. A blocking modal on each click is the "freeze" symptom.
+        show_geometry_on_click=False,
         draw_options={"polyline": False, "polygon": True, "circle": True,
                       "rectangle": True, "marker": False, "circlemarker": False},
         edit_options={"edit": True, "remove": True},
     ).add_to(fmap)
     folium.LayerControl(collapsed=True).add_to(fmap)
 
-    # `center`/`zoom` are passed as parameters rather than baked into the key, so
-    # re-centering on a new target does not discard the user's drawn shapes.
+    # PERFORMANCE BINDING.
+    #  * `key` is CONSTANT: st_folium remounts the whole Leaflet instance when the
+    #    key changes, so keying on centre/zoom/target would rebuild every tile,
+    #    marker and layer on each selection — the CPU spike this is avoiding.
+    #  * `center`/`zoom` are parameters instead, which pans the existing map.
+    #  * `returned_objects` is exactly one entry. Every name listed here is
+    #    serialised browser->Python on EVERY map interaction, including pans and
+    #    zooms; `last_active_drawing` duplicated data already in `all_drawings`
+    #    and was never read.
     return st_folium(
         fmap, key="fleet_map", height=560, use_container_width=True,
         center=list(center), zoom=int(zoom),
-        returned_objects=["all_drawings", "last_active_drawing"],
+        returned_objects=["all_drawings"],
     )
 
 
@@ -572,24 +865,50 @@ def render_pydeck_map(
             get_path="path", get_color=[255, 179, 64, 230], width_min_pixels=4))
 
     if not frame.empty:
+        # IconLayer, same pin art as Folium. The icon spec is per-row because
+        # deck.gl bakes the image into the accessor, which is also how each
+        # vehicle gets its own state colour without a sprite atlas per state.
+        icon_frame = frame.copy()
+        icon_frame["icon"] = [
+            {"url": _pin_data_uri(hex_), "width": 64, "height": 64,
+             "anchorY": 64, "mask": False}
+            for hex_ in icon_frame["state"].map(
+                lambda s: STATE_COLORS.get(s, STATE_COLORS["Offline"])[1])
+        ]
         layers.append(pdk.Layer(
-            "ScatterplotLayer", data=frame, get_position=["lng", "lat"],
-            get_fill_color="color_rgba", get_line_color=[255, 255, 255, 200],
-            get_radius=140, radius_min_pixels=7, radius_max_pixels=18,
-            line_width_min_pixels=1.5, pickable=True, auto_highlight=True))
+            "IconLayer", data=icon_frame, get_icon="icon",
+            get_position=["lng", "lat"], get_size=3.4, size_scale=10,
+            size_min_pixels=22, size_max_pixels=44,
+            pickable=True, auto_highlight=True))
 
     st.pydeck_chart(pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1],
                                          zoom=zoom, pitch=0),
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        # deck.gl has no click-popup primitive, so this hover card IS the single
+        # detail surface here — it is not a duplicate of anything.
         tooltip={
-            "html": ("<b>{thing_name}</b><br/>{state}<br/>"
-                     "Lat {lat} · Lng {lng}<br/>"
-                     "SOC {soc}% · {voltage} V · {current} A<br/>{speed} km/h"),
-            "style": {"backgroundColor": "#121821", "color": "#e4e9f0",
-                      "fontSize": "12px", "borderRadius": "8px",
-                      "fontFamily": "JetBrains Mono, monospace"},
+            "html": (
+                "<div style='font-family:JetBrains Mono,monospace;min-width:210px'>"
+                "<div style='font-size:13px;font-weight:700;color:#4fb3ff;"
+                "padding-bottom:4px;margin-bottom:5px;border-bottom:1px solid #24324a'>"
+                "{thing_name}</div>"
+                "<span style='color:#93a2b8;font-size:10.5px'>STATE</span> "
+                "<b style='color:#fff'>{state}</b><br/>"
+                "<span style='color:#93a2b8;font-size:10.5px'>SOC</span> "
+                "<b style='color:#00e0a4'>{soc}%</b>&nbsp;&nbsp;"
+                "<span style='color:#93a2b8;font-size:10.5px'>V</span> "
+                "<b style='color:#fff'>{voltage}</b>&nbsp;&nbsp;"
+                "<span style='color:#93a2b8;font-size:10.5px'>A</span> "
+                "<b style='color:#fff'>{current}</b><br/>"
+                "<span style='color:#93a2b8;font-size:10.5px'>SPEED</span> "
+                "<b style='color:#fff'>{speed} km/h</b><br/>"
+                "<span style='color:#93a2b8;font-size:10.5px'>LAT/LNG</span> "
+                "<b style='color:#c8d2e0'>{lat}, {lng}</b></div>"),
+            "style": {"backgroundColor": "#0d1420", "border": "1px solid #24324a",
+                      "borderRadius": "10px", "padding": "10px 12px",
+                      "boxShadow": "0 14px 38px rgba(0,0,0,.6)"},
         },
     ), use_container_width=True)
 
@@ -659,11 +978,11 @@ def compact_metrics(items: List[Tuple[str, str, str]]) -> None:
 
 def _block_b_filters(node_names: Tuple[str, ...],
                      counts: Dict[str, int]) -> Tuple[List[str], str]:
-    st.markdown("#### 🔎 Filtering & Selection")
+    st.markdown("####  Filtering & Selection")
     visible = st.multiselect(
         "Filter by state",
         options=ALL_STATES, default=ALL_STATES,
-        format_func=lambda s: f"{STATE_ICON[s]}  {s}  ({counts.get(s, 0)})",
+        format_func=lambda s: f"{s}  ({counts.get(s, 0)})",
         help="Hides markers whose derived state is not selected.",
     )
     focus = st.selectbox(
@@ -674,25 +993,64 @@ def _block_b_filters(node_names: Tuple[str, ...],
     return (visible or ALL_STATES), focus
 
 
-def _block_c_playback(focus: str) -> Tuple[bool, date, date]:
-    st.markdown("#### 🛣️ Route Playback")
+def _block_c_playback(focus: str) -> Tuple[bool, datetime, datetime]:
+    """Playback window, hard-capped at 24 h.
+
+    A datetime range SLIDER rather than a date_input pair: the slider's whole
+    track is exactly [now-24h, now], so an over-long window is not merely
+    validated-and-rejected, it is unreachable. A bounded date_input still allows
+    picking yesterday AND today, which is up to 48 h of rows.
+    """
+    st.markdown("#### Route Playback")
+    now = datetime.now().replace(second=0, microsecond=0)
+    floor = now - timedelta(days=1)
+
     if focus == "All Fleet Vehicles":
         st.caption("Select a single battery in **Filtering & Selection** to enable "
                    "historical playback.")
-        return False, date.today(), date.today()
+        return False, floor, now
 
     enabled = st.toggle("Draw historical route", value=False,
                         help="Overlays the breadcrumb trail for the window below.")
-    today = date.today()
-    span = st.date_input(
-        "Date range", value=(today - timedelta(days=1), today),
-        max_value=today, disabled=not enabled,
+    ts_from, ts_to = st.slider(
+        "Playback window",
+        min_value=floor,
+        max_value=now,
+        value=(now - timedelta(hours=6), now),
+        step=timedelta(minutes=15),
+        format="DD MMM HH:mm",
+        disabled=not enabled,
     )
-    if isinstance(span, tuple) and len(span) == 2:
-        d_from, d_to = span
-    else:                                   # mid-edit: only one date picked yet
-        d_from = d_to = span if isinstance(span, date) else today
-    return enabled, d_from, d_to
+    st.caption("Historical routes are restricted to the last 24 hours to ensure "
+               "optimal performance.")
+    return enabled, ts_from, ts_to
+
+
+def _rename_zone(custom: Dict[str, Dict[str, Any]], old: str, new: str) -> str:
+    """Re-key a custom zone in place. Returns "" on success, else the reason.
+
+    Rebuilds the dict rather than pop-then-insert so the zone keeps its position
+    in the Active dropdown — a renamed zone jumping to the bottom of the list
+    reads as "a different zone appeared".
+
+    Validated against BOTH dicts: a custom zone shadowing a preset name would
+    make `{**HUB_PRESETS, **custom}` silently drop the preset.
+    """
+    new = new.strip()
+    if not new or new == old:
+        return ""
+    if new in HUB_PRESETS:
+        return f"“{new}” is a preset name. Choose another."
+    if new in custom:
+        return f"“{new}” already exists."
+
+    for key in list(custom):                       # preserve insertion order
+        value = custom.pop(key)
+        custom[new if key == old else key] = value
+
+    if st.session_state.get(K_ACTIVE_ZONE) == old:
+        st.session_state[K_ACTIVE_ZONE] = new      # keep the selection alive
+    return ""
 
 
 def _block_d_geofencing() -> Tuple[str, Dict[str, Any]]:
@@ -702,12 +1060,14 @@ def _block_d_geofencing() -> Tuple[str, Dict[str, Any]]:
     imported by `sync_drawn_zones()`; both widgets below read straight from
     session state, so a shape drawn on the map appears here on the same rerun.
     """
-    st.markdown("#### 🛡️ Geofencing & Zones")
+    st.markdown("####  Geofencing & Zones")
     custom: Dict[str, Dict[str, Any]] = st.session_state.setdefault(K_CUSTOM_HUBS, {})
     all_zones = {**HUB_PRESETS, **custom}
 
-    labels = {f"📌 {n}": n for n in HUB_PRESETS}
-    labels.update({f"⚡ {n}": n for n in custom})
+    # Custom zone names already end in "(Custom)", so appending a second marker
+    # produced "Zone 1 (Custom)  (custom)". Only presets need the suffix.
+    labels = {f"{n}  (preset)": n for n in HUB_PRESETS}
+    labels.update({n: n for n in custom})
     label_of = {v: k for k, v in labels.items()}
 
     tab_active, tab_manage = st.tabs(["Active", f"Manage ({len(custom)})"])
@@ -726,29 +1086,54 @@ def _block_d_geofencing() -> Tuple[str, Dict[str, Any]]:
         st.session_state[K_ACTIVE_ZONE] = zone_name
         zone = all_zones[zone_name]
         st.caption(f"{zone_summary(zone)} · centre {resolve_place(zone['lat'], zone['lng'])}")
-        st.caption("✏️ Draw a circle, polygon or rectangle with the map toolbar to "
+        st.caption(" Draw a circle, polygon or rectangle with the map toolbar to "
                    "add a zone — it is saved and selectable immediately.")
 
     with tab_manage:
+        st.caption("Boundaries are edited on the map: pick the edit or trash tool "
+                   "in the toolbar, adjust the shape, then save. Changes are "
+                   "captured automatically.")
+
         if not custom:
             st.caption("No drawn zones yet. Presets are built in and cannot be removed.")
         else:
             for name, z in list(custom.items()):
-                c1, c2 = st.columns([3, 1.1], vertical_alignment="center")
-                c1.markdown(
-                    f"**⚡ {name}**<br><span style='color:#8b98ab;font-size:.72rem'>"
-                    f"{zone_summary(z)}</span>", unsafe_allow_html=True)
-                if c2.button("Delete", key=f"delzone_{name}",
-                             use_container_width=True):
-                    custom.pop(name, None)
-                    # Drop the fingerprint too, otherwise the shape still on the
-                    # map would never be re-importable after deletion.
-                    fp = z.get("fingerprint")
-                    if fp:
-                        st.session_state.setdefault(K_SEEN_SHAPES, set()).discard(fp)
-                    if st.session_state.get(K_ACTIVE_ZONE) == name:
-                        st.session_state[K_ACTIVE_ZONE] = next(iter(HUB_PRESETS))
-                    st.rerun()
+                # [name | menu] — one popover per row keeps the list scannable
+                # instead of three competing buttons per zone.
+                c_name, c_menu = st.columns([3, 1], vertical_alignment="center")
+                c_name.markdown(
+                    f"<div class='zn-row'><span class='zn-name'>{name}</span>"
+                    f"<span class='zn-meta'>{zone_summary(z)}</span></div>",
+                    unsafe_allow_html=True)
+
+                with c_menu.popover("⋮", use_container_width=True):
+                    st.caption(name)
+
+                    new_name = st.text_input("Rename", value=name, key=f"rn_{name}")
+                    if st.button("Save name", key=f"btnrn_{name}",
+                                 use_container_width=True):
+                        err = _rename_zone(custom, name, new_name)
+                        if err:
+                            st.warning(err)
+                        else:
+                            st.rerun()
+
+                    st.divider()
+                    if st.button("Delete zone", key=f"delzone_{name}",
+                                 type="primary", use_container_width=True):
+                        custom.pop(name, None)
+                        # Drop the fingerprint too, otherwise the shape still on
+                        # the map would never be re-importable after deletion.
+                        # Keep the fingerprint as a TOMBSTONE. Saved zones are
+                        # rendered into the editable group, so the shape is still
+                        # present in the all_drawings snapshot for this cycle —
+                        # discarding the fingerprint here made sync_drawn_zones
+                        # re-import it instantly, which is the "deleted zone
+                        # comes back" bug.
+                        if st.session_state.get(K_ACTIVE_ZONE) == name:
+                            st.session_state[K_ACTIVE_ZONE] = next(iter(HUB_PRESETS))
+                        st.rerun()
+
             st.caption("Deleting a zone here does not erase the shape from the map; "
                        "clear it with the map's trash tool if you want it gone visually.")
 
@@ -770,11 +1155,10 @@ def render_map_console() -> None:
 
     fleet_info = fl.discover()
     if fleet_info.error:
-        st.error(f"Fleet discovery failed: {fleet_info.error}", icon="⛔")
+        st.error(f"Fleet discovery failed: {fleet_info.error}")
         return
     if not fleet_info.names:
-        st.info("No nodes registered. Provision a device to enable spatial tracking.",
-                icon="📡")
+        st.info("No nodes registered. Provision a device to enable spatial tracking.")
         return
 
     nodes = build_spatial_state(fleet_info)
@@ -800,26 +1184,48 @@ def render_map_console() -> None:
     with panel:
         visible_states, focus = _block_b_filters(fleet_info.names, counts)
         st.divider()
-        play_on, day_from, day_to = _block_c_playback(focus)
+        play_on, ts_from, ts_to = _block_c_playback(focus)
         st.divider()
         zone_name, active_zone = _block_d_geofencing()
 
     target = nodes.get(focus) if focus != "All Fleet Vehicles" else None
     frame = nodes_to_frame(nodes, visible_states)
 
-    if target and target.has_fix:
-        center, zoom = (target.lat, target.lng), 14
-    elif not frame.empty:
-        center, zoom = (float(frame["lat"].mean()), float(frame["lng"].mean())), 11
-    else:
-        center, zoom = DEFAULT_CENTER, 11
+    # ---------------------------------------------------------------- camera
+    # STICKY view held in session state, recomputed only on an actual event.
+    #
+    # The previous version derived the centre from a precedence chain on every
+    # run. Selecting a zone centred it for exactly one rerun, then the next
+    # rerun (st_folium fires one on any map interaction) saw zone_changed==False
+    # and fell through to the fleet centroid — the map snapped straight back,
+    # which is why dropdown centring looked broken.
+    zone_changed = st.session_state.get(K_ZONE_CENTRED) != zone_name
+    st.session_state[K_ZONE_CENTRED] = zone_name
+    focus_changed = st.session_state.get(K_LAST_FOCUS) != focus
+    st.session_state[K_LAST_FOCUS] = focus
+
+    view = st.session_state.get(K_VIEW)
+    if zone_changed and active_zone:
+        view = (active_zone["lat"], active_zone["lng"], 14)
+    elif focus_changed and target and target.has_fix:
+        view = (target.lat, target.lng, 14)
+    elif view is None:                       # first paint only
+        if target and target.has_fix:
+            view = (target.lat, target.lng, 14)
+        elif not frame.empty:
+            view = (float(frame["lat"].mean()), float(frame["lng"].mean()), 11)
+        else:
+            view = (*DEFAULT_CENTER, 11)
+    st.session_state[K_VIEW] = view
+
+    center, zoom = (view[0], view[1]), view[2]
 
     focus_place = resolve_place(target.lat, target.lng) if target else ""
 
     route = None
     if play_on and target and target.has_fix:
         route = generate_historical_route(target.thing_name, target.lat, target.lng,
-                                          day_from, day_to)
+                                          ts_from, ts_to)
 
     with canvas:
         # ---------- focused unit summary: places, not coordinates ----------
@@ -827,7 +1233,7 @@ def render_map_console() -> None:
             compact_metrics([
                 ("UNIT", target.thing_name, ""),
                 ("LOCATION", focus_place, ""),
-                ("STATE", f"{STATE_ICON[target.state]} {target.state}",
+                ("STATE", target.state,
                  target.color_hex),
                 ("SPEED", f"{target.speed_kmh:.1f} km/h", ""),
             ])
@@ -839,8 +1245,8 @@ def render_map_console() -> None:
             ])
 
         if route is not None and not route.empty:
-            st.caption(f"🛣️ Route playback · **{len(route)} points** · "
-                       f"{day_from:%d %b} → {day_to:%d %b} · *synthetic trail until a "
+            st.caption(f" Route playback · **{len(route)} points** · "
+                       f"{ts_from:%d %b %H:%M} → {ts_to:%H:%M} · *synthetic trail until a "
                        f"telemetry history store is wired*")
 
         if HAS_FOLIUM:
@@ -849,10 +1255,15 @@ def render_map_console() -> None:
                                     target.thing_name if target else "")
             # Auto-import drawn shapes. `all_drawings` (not last_active_drawing)
             # so shapes drawn while the script was mid-run are not missed.
+            # `.get` returns None when the component has not reported yet, which
+            # sync_drawn_zones treats as "no information" rather than "no shapes".
             created = sync_drawn_zones((out or {}).get("all_drawings"))
             if created:
-                st.session_state[K_ACTIVE_ZONE] = created[-1]
-                st.toast(f"Zone saved: {created[-1]}", icon="🛡️")
+                if created[-1] in st.session_state.get(K_CUSTOM_HUBS, {}):
+                    st.session_state[K_ACTIVE_ZONE] = created[-1]
+                    st.toast(f"Zone saved: {created[-1]}")
+                else:
+                    st.toast(f"Zone removed: {created[-1]}")
                 # Fires once per shape: the fingerprint is now recorded, so the
                 # next pass finds nothing new and does not rerun again.
                 st.rerun()
@@ -871,14 +1282,14 @@ def render_map_console() -> None:
         if n.has_fix and not zone_contains(active_zone, n.lat, n.lng)
     ]
     if breaches:
-        st.warning(f"⚠️ **{len(breaches)}** vehicle(s) outside **{zone_name}**.")
+        st.warning(f" **{len(breaches)}** vehicle(s) outside **{zone_name}**.")
         with st.expander("Breach detail"):
             st.dataframe(pd.DataFrame(breaches), use_container_width=True,
                          hide_index=True)
 
     # ---------- fleet grid ----------
     st.divider()
-    st.markdown("#### 📋 Fleet Detail")
+    st.markdown("####  Fleet Detail")
     if frame.empty:
         st.caption("No vehicles match the current state filter.")
         return
