@@ -5,13 +5,55 @@ Automates the upload of AWS Root CA, Device Certificate,
 and Private Key to the EC200U-CN Modem's UFS memory.
 =========================================================
 """
-import serial
-import time
 import os
+import time
 
-# Configuration variables (Adjust COM port according to your OS)
-SERIAL_PORT = 'COM3' 
-BAUD_RATE = 115200
+import serial
+from serial.tools import list_ports
+
+# --- Serial port resolution -------------------------------------------------
+# Resolved at run time instead of hardcoded, so the same script works on Windows
+# (COM3) and macOS/Linux (/dev/cu.usbserial-*). Order:
+#   1. SERIAL_PORT from .env  — the key already existed but was ignored, which
+#      made this script the single blocker on any non-Windows machine.
+#   2. Auto-detect a USB-serial bridge (CP210x / CH34x / FTDI).
+#   3. Fail with the candidate list rather than a bare SerialException.
+_USB_HINTS = ("usbserial", "wchusbserial", "usbmodem", "slab_usbtouart",
+              "cp210", "ch340", "ch910", "ftdi")
+
+
+def _load_env_port() -> str:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass                      # python-dotenv is optional; env may be preset
+    return (os.getenv("SERIAL_PORT") or "").strip().strip('"').strip("'")
+
+
+def _autodetect_port() -> str:
+    for p in list_ports.comports():
+        haystack = f"{p.device} {p.description} {p.manufacturer or ''}".lower()
+        if any(h in haystack for h in _USB_HINTS):
+            return p.device
+    return ""
+
+
+def resolve_serial_port() -> str:
+    port = _load_env_port() or _autodetect_port()
+    if not port:
+        found = [f"{p.device} ({p.description})" for p in list_ports.comports()]
+        raise SystemExit(
+            "[FATAL] No serial port found.\n"
+            "        Set SERIAL_PORT in .env (Windows: COM3, "
+            "macOS: /dev/cu.usbserial-0001).\n"
+            f"        Ports visible now: {found or 'none'}"
+        )
+    return port
+
+
+SERIAL_PORT = resolve_serial_port()
+BAUD_RATE = int(os.getenv("BAUD_RATE", "115200"))
 
 # Helper function to send AT commands and decode response
 def send_at_command(ser, cmd, delay=1):

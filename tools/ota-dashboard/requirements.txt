@@ -8,3 +8,10 @@ boto3>=1.34,<2.0
 botocore>=1.34,<2.0
 pandas>=2.2,<3.0
 tzdata>=2024.1            # zoneinfo database on Windows
+
+# --- Map Console ---
+# These were imported but never declared, so the Docker image silently fell back
+# to the PyDeck canvas (no draw tools) and geocoding was dead.
+folium>=0.15,<1.0
+streamlit-folium>=0.20,<1.0
+geopy>=2.4,<3.0           # Nominatim reverse geocoding; results cached 24 h

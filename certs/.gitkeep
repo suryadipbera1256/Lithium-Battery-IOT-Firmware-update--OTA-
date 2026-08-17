@@ -1,0 +1,15 @@
+# Keeps certs/ present on a fresh clone.
+#
+# .gitignore excludes certs/* so no private key can ever be committed, which
+# also means the directory itself would not exist after `git clone` — and
+# scripts/factory_flash.py opens certs/rootCA.pem directly, so it would fail
+# with FileNotFoundError before printing anything useful.
+#
+# Populate with:
+#   aws iot create-keys-and-certificate --set-as-active \
+#     --certificate-pem-outfile certs/cert.pem \
+#     --private-key-outfile     certs/privkey.pem \
+#     --public-key-outfile      certs/public.pem
+#   curl -fsSL https://www.amazontrust.com/repository/AmazonRootCA1.pem \
+#     -o certs/rootCA.pem
+#   chmod 600 certs/*.pem

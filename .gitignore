@@ -1,19 +1,32 @@
 # ==========================================================
 # AS AI — Battery Fleet Firmware + OTA Dashboard
 #
-# Layout this protects:
-#   /                        PlatformIO C++ firmware (ESP32 + EC200U-CN)
-#   /tools/ota-dashboard/    isolated Python/Streamlit workspace
+# Repository layout this protects:
+#   /                       PlatformIO C++ firmware (ESP32 + EC200U-CN)
+#   /certs/                 per-device AWS mTLS material
+#   /scripts/               provisioning helpers (pyserial / dotenv)
+#   /tools/ota-dashboard/   isolated Python + Streamlit workspace
 #
-# Secret rules are duplicated deliberately: once by exact path and once as a
-# recursive glob. A single misplaced copy of secrets.toml or a .pem key is a
-# fleet-wide credential leak, so these patterns are intentionally redundant.
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH. tools/ota-dashboard/.gitignore is
+# deliberately reduced to secret rules only — duplicated rules in two files
+# drift, and a rule that silently stopped matching is how generated IAM policies
+# carrying a live account ID ended up committed once already.
+#
+# Two habits worth keeping:
+#   * verify, do not assume:  git check-ignore -v <path>
+#   * .gitignore does NOT untrack an already-tracked file. If something is
+#     committed that should not be:  git rm -r --cached <path>
 # ==========================================================
 
+
 # ----------------------------------------------------------
-# CREDENTIALS & SECRETS  (CRITICAL — never relax these)
+# 1. CREDENTIALS & SECRETS   (CRITICAL — never relax)
 # ----------------------------------------------------------
-# Environment files, including every variant (.env.local, .env.production, ...)
+# Rules here are intentionally redundant (exact path AND recursive glob). One
+# stray copy of a private key or secrets.toml is a fleet-wide compromise, and
+# the cost of an extra pattern is nothing.
+
+# Environment files, every variant (.env.local, .env.production, .env.mac …)
 .env
 .env.*
 !.env.example
@@ -25,24 +38,36 @@
 *.der
 *.p12
 *.pfx
+*.jks
+
+# Whole certs/ payload. The directory is intentionally empty on a fresh clone;
+# `mkdir -p certs` before running scripts/factory_flash.py.
 certs/*
 !certs/.gitkeep
 !certs/README*
 
-# Streamlit secrets: real values live here, templates end in .example.
-# Both forms are ignored at any depth; only the .example is ever committed.
+# Streamlit secrets: real values only. The .example template must still ship.
 secrets.toml
 **/secrets.toml
 .streamlit/secrets.toml
 tools/ota-dashboard/.streamlit/secrets.toml
 !**/secrets.toml.example
 
-# AWS / cloud credential caches that tooling sometimes drops in-tree
+# Cloud credential caches some tooling drops in-tree
 .aws/
 *.credentials
+*.pkcs12
+
+# Rendered, apply-ready IAM policies (iam/render_policies.py output). Generated,
+# and they embed a concrete ACCOUNT ID — shipping them lets a clone in a
+# DIFFERENT account apply policies referencing resources it does not own. Those
+# attach without error and then silently match nothing.
+tools/ota-dashboard/iam/out/
+iam/out/
+
 
 # ----------------------------------------------------------
-# PLATFORMIO / FIRMWARE BUILD OUTPUT
+# 2. FIRMWARE BUILD OUTPUT (PlatformIO / ESP32)
 # ----------------------------------------------------------
 .pio/
 .pioenvs/
@@ -50,9 +75,8 @@ tools/ota-dashboard/.streamlit/secrets.toml
 lib/*/examples/
 lib/*/test/
 
-# Compiled images and link artefacts. Firmware binaries are published to
-# s3://as-ota-firmware/firmwares/ — the bucket is the distribution channel,
-# not git. Use `git add -f` if you ever genuinely need to pin one.
+# Compiled images and link artefacts. Firmware is distributed through
+# s3://<bucket>/firmwares/, not git. Use `git add -f` to pin one deliberately.
 *.bin
 *.elf
 *.hex
@@ -62,11 +86,23 @@ lib/*/test/
 *.d
 *.su
 
+# Generated toolchain metadata — absolute, machine-local paths inside.
+compile_commands.json
+.clangd/
+.cache/
+
+# ESP-IDF, if the project ever moves off the Arduino framework
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+
 # ----------------------------------------------------------
-# PYTHON  (dashboard + scripts/)
+# 3. PYTHON  (dashboard + provisioning scripts)
 # ----------------------------------------------------------
-# Virtualenvs. The root .venv holds PlatformIO; the dashboard has its own,
-# deliberately separate one. Neither is ever committed.
+# TWO separate virtualenvs by design: the root one belongs to PlatformIO, the
+# dashboard has its own. Neither is ever committed.
 .venv/
 venv/
 env/
@@ -94,12 +130,15 @@ pip-delete-this-directory.txt
 .coverage.*
 htmlcov/
 coverage.xml
+.ipynb_checkpoints/
+
 
 # ----------------------------------------------------------
-# EDITORS & IDE
+# 4. EDITORS & IDE
 # ----------------------------------------------------------
-# Share the two files that make a fresh clone build correctly; ignore the rest
-# (c_cpp_properties.json and launch.json carry absolute local paths).
+# Ship the two files that make a fresh clone build correctly; ignore the rest.
+# c_cpp_properties.json and launch.json embed absolute local toolchain paths and
+# differ per machine — committing them breaks the next person's IntelliSense.
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
@@ -107,13 +146,17 @@ coverage.xml
 *.code-workspace
 *.sublime-project
 *.sublime-workspace
+*.swp
+*.swo
+*~
 
 # Claude Code: machine-local overrides only. A shared .claude/settings.json
 # stays tracked so team-wide hooks and permissions travel with the repo.
 .claude/settings.local.json
 
+
 # ----------------------------------------------------------
-# LOGS & SCRATCH
+# 5. LOGS, CAPTURES & SCRATCH
 # ----------------------------------------------------------
 *.log
 logs/
@@ -121,22 +164,26 @@ logs/
 *.bak
 *.orig
 *.rej
-*~
 scratch/
 tmp/
 
-# Serial-monitor and modem AT captures — these embed IMEI/ICCID and full
-# pre-signed OTA URLs, so they are operational data, not source.
+# Serial-monitor and modem AT captures. These embed IMEI, ICCID and complete
+# pre-signed OTA URLs — operational data, not source.
 *.cap
 monitor_*.txt
 at_capture*.txt
 
+
 # ----------------------------------------------------------
-# OS GENERATED
+# 6. OS GENERATED
 # ----------------------------------------------------------
+# macOS entries matter now that the toolchain is moving to a Mac: .DS_Store is
+# written into every directory Finder opens.
 .DS_Store
 .DS_Store?
 ._*
+.AppleDouble
+.LSOverride
 .Spotlight-V100
 .Trashes
 ehthumbs.db
